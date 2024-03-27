@@ -1,0 +1,19 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J hifi_meryl
+#BSUB -e hifi_meryl.err
+#BSUB -o hifi_meryl.out
+#BSUB -W 24:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=5000]"
+#BSUB -q bigmem
+
+echo $(date -u) "building kmer profile from hifi reads with meryl..."
+
+meryl count [k=21 memory=40 threads=8 all.hifi_reads.fastq output hifi_reads.meryl]
+
+echo $(date -u) "kmer profile built! Generating histogram..."
+
+meryl histogram hifi_reads.meryl > hifi_reads.hist
+
+echo $(date -u) "Hisogram built! All done."

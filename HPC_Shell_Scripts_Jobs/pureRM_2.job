@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_pureRM
+#BSUB -o repmasker_pureRM.out
+#BSUB -e repmasker_pureRM.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=5000]"
+#BSUB -n 10
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+#Test models using only De Novo libraries skipping Dfam
+RepeatMasker -pa 9 \
+-a \
+-e ncbi \
+-dir PureRM \
+-nolow \
+-lib fOpsBet2.1_genomic-families.prefix.fa \
+01_simple_out/${GENOME}.simple_mask.masked.fa \
+2>&1 | tee logs/PureRM_knownmask.log
+# round pureRM: rename outputs
+rename simple_mask.masked.fa known_mask PureRM/${GENOME}*
+rename .masked .masked.fa PureRM/${GENOME}*

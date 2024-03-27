@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_round3
+#BSUB -o repmasker_round3.out
+#BSUB -e repmasker_round3.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=5000]"
+#BSUB -n 10
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+
+GENOME=fOpsBet2.1_genomic
+
+# round 3: annotate/mask known elements sourced from species-specific de novo repeat library using output froom 2nd round of RepeatMasker
+RepeatMasker -pa 9 \
+-a \
+-e ncbi \
+-dir 03_known_out \
+-nolow \
+-lib round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known \
+02_actinopterygii_out/${GENOME}.actinopterygii_mask.masked.fa \
+2>&1 | tee logs/03_knownmask.log
+# round 3: rename outputs
+rename actinopterygii_mask.masked.fa known_mask 03_known_out/${GENOME}*
+rename .masked .masked.fas 03_known_out/${GENOME}*

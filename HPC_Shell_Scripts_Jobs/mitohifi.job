@@ -1,0 +1,41 @@
+#! /usr/bin/env bash
+
+#BSUB -P coral_omics
+#BUSB -J MitoHifi
+#BSUB -e MitoHifi.err
+#BSUB -o MitoHifi.out
+#BSUB -W 48:00
+#BSUB -n 8
+#BSUB -q general
+
+mkdir -p mitohifi_reads
+mkdir -p mitohifi_assembly
+
+##find reference mitochondrial genome from nearest relative
+python /nethome/n.kron/local/MitoHiFi/3.0.0/findMitoReference.py \
+--species "Opsanus beta" \
+--type mitochondrion \
+--outfolder ./
+
+##Our closest relative was Porichthys myriaster (AP006739.1)
+#AP006739.1.fasta
+#AP006739.1.gb
+
+cd mitohifi_reads
+
+##warning for hifi reads, mitohifi does not seem to handle gzipped files
+#python /nethome/n.kron/local/MitoHiFi/3.0.0/mitohifi.py \
+#-r ../../../raw_reads/all.hifi_reads.fastq \
+#-f ../AP006739.1.fasta \
+#-g ../AP006739.1.gb \
+#-t 8 \
+#-o 2
+
+cd ../mitohifi_assembly
+
+python /nethome/n.kron/local/MitoHiFi/3.0.0/mitohifi.py \
+-c ../../primary_asm.fa \
+-f ../AP006739.1.fasta \
+-g ../AP006739.1.gb \
+-t 8 \
+-o 2

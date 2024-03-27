@@ -1,0 +1,24 @@
+#! /usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J merqury
+#BSUB -e merqury.err
+#BSUB -o merqury.out
+#BSUB -q bigmem
+#BSUB -n 8
+#BSUB -R "rusage[mem=2000]"
+#BSUB -W 24:00
+
+WORKDIR=${HOME}/coral_omics
+
+~/mambaforge/envs/merqury/bin/merqury.sh \
+"${WORKDIR}/raw_reads/hifi_reads.meryl" \
+primary.fa \
+alternate.fa \
+initial
+
+~/mambaforge/envs/merqury/bin/merqury.sh \
+"${WORKDIR}/raw_reads/hifi_reads.meryl" \
+primary_purged.fa \
+alt_purged.fa \
+purged

@@ -1,0 +1,31 @@
+
+#!/bin/bash
+#BSUB -J purge
+#BSUB -q general
+#BSUB -W 120:00
+#BSUB -P coral_omics
+#BSUB -R "rusage[mem=3500]"
+#BSUB -o /scratch/projects/coral_omics/flye_assembly/purge_flye.out
+#BSUB -e /scratch/projects/coral_omics/flye_assembly/purge_flye.err
+#BSUB -n 1
+
+# activate module
+#conda activate purge_haplotigs
+
+# purge haplotigs 
+# sort and index bam file
+#samtools sort mapping.sam > sorted_mapped.bam
+#samtools index sorted_mapped.bam
+
+# index genome file
+#samtools faidx /scratch/projects/coral_omics/flye_assembly/00-assembly/draft_assembly.fasta
+
+# generate a coverage histogram
+#purge_haplotigs hist -b sorted_mapped.bam -g /scratch/projects/coral_omics/flye_assembly/00-assembly/draft_assembly.fasta -t 8
+
+# set cutoffs after looking at histogram
+#purge_haplotigs cov -i /scratch/projects/coral_omics/flye_assembly/sorted_mapped.bam.gencov -l 5 -m 40 -h 70
+
+# run the purging
+purge_haplotigs purge -g /scratch/projects/coral_omics/flye_assembly/00-assembly/draft_assembly.fasta -c /scratch/projects/coral_omics/flye_assembly/coverage_stats.csv -t 1
+

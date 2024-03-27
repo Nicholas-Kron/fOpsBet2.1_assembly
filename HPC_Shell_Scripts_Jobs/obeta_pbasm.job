@@ -1,0 +1,18 @@
+#!/bin/bash
+#BSUB -P coral_omics
+#BSUB -J obeta_pbasm
+#BSUB -e obeta_pbasm.err
+#BSUB -o obeta_pbasm.out
+#BSUB -W 168:00
+#BSUB -n 1
+#BSUB -q general
+
+# load dependencies
+source activate denovo_asm
+
+# navigate to job directory, directory containing input.fofn
+cd /scratch/projects/coral_omics/falcon_job
+
+# run it!
+fc_run fc_run_obeta_pbasm_HiFi.cfg &> run0.log &
+

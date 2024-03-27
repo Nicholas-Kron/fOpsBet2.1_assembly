@@ -1,0 +1,19 @@
+#!/bin/bash
+#BSUB -n 15
+#BSUB -J diamond_peps  
+#BSUB -o diamond_peps.out
+#BSUB -e diamond_peps.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -P coral_omics
+
+
+[[ -f diamond_peps.err || -f diamon_peps.out ]] && rm diamond_peps.out diamond_peps.err
+
+diamond blastp --query Obeta_v1_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered \
+--db refseq_protein_Jan2023/refseq_protein \
+--threads 15 \
+--evalue 1e-6 \
+--query-cover 80 \
+--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen qcovhsp \
+--out diamond.blastp.outfmt6

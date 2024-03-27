@@ -1,0 +1,31 @@
+#!/bin/bash
+#BSUB -J busco
+#BSUB -q general
+#BSUB -W 120:00
+#BSUB -P coral_omics
+#BSUB -o busco_asms.out
+#BSUB -e busco_asms.err
+#BSUB -n 8
+#BSUB -q general
+
+echo $(date -u) "Assessing gene completeness using BUSCO for primary assembly..."
+echo $(busco --version)
+
+for asm in *.fa
+do
+name=`basename -s .fa ${asm}`
+
+#assess fish buscos
+echo $(date -u) "Assessing ${asm} for ray-finned fishes BUSCO"
+busco \
+-i ${asm} \
+-o ${name}_actinopterygii \
+-m genome \
+-l "actinopterygii" \
+--cpu 8 \
+--scaffold_composition \
+--out_path BUSCO
+
+echo $(date -u) "Ray-finned fish BUSCOs ffor ${name} calulated! Bye..."
+
+done

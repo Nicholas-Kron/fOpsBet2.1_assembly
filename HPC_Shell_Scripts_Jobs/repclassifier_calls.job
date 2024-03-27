@@ -1,0 +1,22 @@
+#!/bin/bash
+
+#BSUB -n 15
+#BSUB -J repclassifier
+#BSUB -o repclassifier.out
+#BSUB -e repclassifier.err
+#BSUB -q debug
+#BSUB -P coral_omics
+
+# classifying unknowns (-u): run with 3 threads/cores (-t) and using the Actinopterygii elements (-d) from Dfam
+# and known elements (-k) from the same reference genome; append newly identified elements to the existing known
+# element library (-a) and write results to an output directory (-o)
+repclassifier -t 15 -d Actinopterygii -u Obeta-families.prefix.fa.unknown \
+-k Obeta-families.prefix.fa.known -a Obeta-families.prefix.fa.unknown \
+-o round-1_DfamActinopterygii-Self
+
+# classifying unknowns (-u): run with 3 threads/cores (-t) and using only the known elements (-k) from the
+# same reference genome; append newly identified elements to the existing known element library (-a) and
+# write results to an output directory (-o). No Dfam classification is used here.
+repclassifier -t 15 -u round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.unknown \
+-k round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known \
+-a round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known -o round-2_Self

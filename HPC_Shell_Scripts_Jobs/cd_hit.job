@@ -1,0 +1,15 @@
+#!/bin/bash
+#BSUB -P coral_omics
+#BSUB -J CD-HIT_job
+#BSUB -o CD-HIT_job.out
+#BSUB -e CD-HIT_job.err
+#BSUB -W 72:00
+#BSUB -q general
+#BSUB -n 8
+
+
+GENOME_NAME=Obeta_v1
+
+cd-hit -i ${GENOME_NAME}_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered.top_coverage_final.faa \
+-o ${GENOME_NAME}_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered.top_coverage_final.faa.cdhit75 \
+-c 0.75 -n 5 -T 8 -M 8000

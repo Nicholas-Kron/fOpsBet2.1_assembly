@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J processreps
+#BSUB -o processreps.out
+#BSUB -e processreps.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -n 5
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+
+# use Daren's custom script to convert .out to .gff3 for all repeats, simple repeats only, and complex repeats only
+rmOutToGFF3custom -o 05_full_out/${GENOME}.full_mask.out > 05_full_out/${GENOME}.full_mask.gff3
+rmOutToGFF3custom -o 05_full_out/${GENOME}.simple_mask.out > 05_full_out/${GENOME}.simple_mask.gff3
+rmOutToGFF3custom -o 05_full_out/${GENOME}.complex_mask.out > 05_full_out/${GENOME}.complex_mask.gff3

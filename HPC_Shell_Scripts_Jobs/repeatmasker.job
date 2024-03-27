@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_round1
+#BSUB -o repmasker_round1.out
+#BSUB -e repmasker_round1.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=5000]"
+#BSUB -n 10
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+
+RepeatMasker -pa 10 \
+-a \
+-gff \
+-e ncbi \
+-dir RepeatMasker \
+-xsmall \
+-lib fOpsBet2.1_genomic-families_no_prot.fa \
+../../assemblies/fOpsBet2.1_genomic.fa 2>&1 | tee RepeatMasker/repeatmasking.log
+
+#rename outputs
+rename fa simple_mask RepeatMasker/${GENOME}*
+rename .masked .masked.fa RepeatMasker/${GENOME}*
+

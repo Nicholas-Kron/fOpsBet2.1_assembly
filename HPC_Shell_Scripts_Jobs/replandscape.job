@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J processreps
+#BSUB -o replandscapes.out
+#BSUB -e replandscapes.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -n 5
+
+export PATH=$PATH:/nethome/n.kron/mambaforge/envs/repeatmodeling/share/RepeatMasker
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+allLen=`seqtk comp ../${GENOME}.fa | datamash sum 2`
+
+#generate landscapes using RepeatMasker scripts
+
+#had to modify calcDivergenceFromAlign.pl to 
+### TODO: Remove this
+#use lib "/nethome/n.kron/mambaforge/envs/repeatmodeling/share/RepeatMasker/";
+#to find proper perl modules
+
+calcDivergenceFromAlign.pl -s ${GENOME}.full_mask.divsum ${GENOME}.full_mask.align.gz
+
+createRepeatLandscape.pl -div ${GENOME}.full_mask.divsum -g ${allLen} ${GENOME}.full_mask.align.gz > ${GENOME}.full_mask.align.html

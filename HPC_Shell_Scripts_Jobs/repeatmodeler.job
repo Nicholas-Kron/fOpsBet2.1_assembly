@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -J repmodel
+#BSUB -o repmodel.out
+#BSUB -e repmodel.err
+#BSUB -q bigmem
+#BSUB -n 15
+#BSUB -R "rusage[mem=7500]"
+#BSUB -W 120:00
+
+##set the perl lib to the one in the conda env
+export PERL5LIB="/nethome/n.kron/mambaforge/envs/repeatmodeling/bin/perl"
+echo $PERL5LIB
+
+##Build blast database
+BuildDatabase -name fOpsBet2.1_genomic fOpsBet2.1_genomic.fa
+
+##model repeats
+RepeatModeler -database fOpsBet2.1_genomic \
+-pa 5 \
+-LTRStruct \
+1>fOpsBet2.1_repmodel.out \
+2>fOpsBet2.1_repmodel.err
+
+##for -pa RMBlast uses 3 threads for every one pa thread, so 3*5 = 15 chosen for bigmem cores

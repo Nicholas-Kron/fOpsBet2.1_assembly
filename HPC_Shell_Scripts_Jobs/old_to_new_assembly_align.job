@@ -1,0 +1,13 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J old2new
+#BSUB -e old2new.err
+#BSUB -o old2new.out
+#BSUB -W 120:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=7500]"
+#BSUB -q bigmem
+
+minimap2 -ax asm5 fOpsBet2.1_genomic.fa GCA_900660325.1_fOpsBet1.1.fa | samtools sort -o old2new.bam -O BAM -@ 8 -
+samtools index -@ 8 old2new.bam
+

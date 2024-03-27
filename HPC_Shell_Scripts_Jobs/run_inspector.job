@@ -1,0 +1,114 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=10000]"
+#BSUB -J inspector
+#BSUB -n 16
+#BSUB -e inspector.err
+#BSUB -o inspector.out
+
+hifi_reads=../../raw_reads/all.hifi_reads.fastq
+
+echo "################################################################################"
+echo "                           prepare for inspector run                            "
+echo "################################################################################"
+
+echo "WARNING: This script assumes it is being run from the inspector working directory!"
+echo "WARNING: This script assumes your assembly has been symlinked to the current_asm.fa!"
+echo "WARNING: This script assumes inspector.py and inspector-correct.py are in your PATH"
+echo "         or in an active conda environment!"
+
+echo "checking for target assembly..."
+
+if [[ ! -e current_asm.fa ]]
+then
+  echo "ERROR: could not find target assembly! Exiting..."
+  exit
+fi
+
+echo "checking for hifi reads..."
+echo "hifi reads path is ${hifi_reads}"
+if [[ ! -f ${hifi_reads} ]] 
+then
+  echo "ERROR: could not find hifi reads! Exiting..."
+  exit
+fi
+
+if [[ ! -d inspector_logs ]] 
+then
+  echo "no directory for inspector logs detected. Creating one now..."
+  mkdir inspector_logs
+  echo "done!"
+fi
+
+if [[ ! -f round.txt ]] 
+then
+  echo "no record of previous runs exists, initializing round in round.txt as round 1"
+  echo "1" > round.txt
+fi
+
+round=`cat round.txt`
+echo "current round is: ${round}"
+echo "current assembly is:" $(ls -lh current_asm.fa)
+
+echo $(date -u) "Begining inspector run..."
+
+echo "################################################################################"
+echo "                             run inspector.py                                   "
+echo "################################################################################"
+
+echo "Running inspector..."
+
+inspector.py \
+-c current_asm.fa \
+-r $hifi_reads \
+-o inspector_round_${round}/ \
+--datatype hifi
+
+echo "inspector run compelte..."
+
+echo "################################################################################"
+echo "                          run inspector-correct.py                              "
+echo "################################################################################"
+
+echo "correcting assembly..."
+
+inspector-correct.py \
+-i inspector_round_${round}/ \
+--datatype pacbio-hifi \
+-o inspector_round_${round} \
+-t 16
+
+echo "assembly corrected..."
+
+echo "################################################################################"
+echo "                              prep next round                                   "
+echo "################################################################################"
+
+echo "sim linking to corrected fasta"
+
+rm current_asm.fa
+
+ln -s inspector_round_${round}/contig_corrected.fa current_asm.fa
+
+echo "current assembly is:" $(ls -lh current_asm.fa)
+
+echo "moving log files to ./inspector_logs"
+
+cp inspector_round_${round}/summary_statistics inspector_logs/round_${round}_summary_statistics.txt
+cp inspector_round_${round}/Inspector.log inspector_logs/round_${round}_Inspector.log
+cp inspector_round_${round}/Inspector_correct.log inspector_logs/round_${round}_Inspector_correct.log
+
+echo "incrementing round..."
+echo "this round was round ${round}"
+round=$((round+1))
+echo ${round} > round.txt
+round=`cat round.txt`
+echo "next round is round ${round}"
+
+echo "################################################################################"
+echo "                           inspector run complete                               "
+echo "################################################################################"
+

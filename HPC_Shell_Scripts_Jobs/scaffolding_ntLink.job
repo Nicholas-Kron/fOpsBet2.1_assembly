@@ -1,0 +1,20 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=3000]"
+#BSUB -J ntlinks-ark_scaffold
+#BSUB -n 5
+#BSUB -e ntlinks_scaffold.err
+#BSUB -o ntlinks_scaffold.out
+
+
+ntLink_rounds run_rounds_gaps \
+t=5 \
+g=100 \
+v=1 \
+rounds=5 \
+w=250 \
+target=current_asm.fa \
+reads=hifi_reads.fastq

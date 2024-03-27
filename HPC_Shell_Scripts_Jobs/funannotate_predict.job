@@ -1,0 +1,31 @@
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 100:00
+#BSUB -J fun_predict
+#BSUB -n 15
+#BSUB -R "rusage[mem=2000]"
+#BSUB -e fun_predict.err
+#BSUB -o fun_predict.out
+
+###BSUB -R "rusage[mem=12000]"
+
+PERL5LIB=/nethome/n.kron/mambaforge/envs/funannotate/bin/perl
+
+funannotate predict \
+-i /nethome/n.kron/coral_omics/fOpsBet2.1/repeats/repclassifier/05_full_out/fOpsBet2.1_genomic.full_mask.soft_satellite_mask.fa \
+-o funannotate/predict \
+--SeqCenter "UC Davis DNA Technologies & Expression Analysis Core" \
+--species "Opsanus beta" \
+--isolate "Bic" \
+--name "P3L16" \
+--transcript_evidence "pasa/Obeta_hq_transcripts_fixed.fasta.clean" \
+--rna_bam "pasa/Obeta_hq_transcripts_fixed.fasta.clean.mm2.bam" \
+--pasa_gff "pasa/fOpsBet2.1_pasa_db.assemblies.fasta.transdecoder.genome.gff3" \
+--organism "other" \
+--repeats2evm \
+--keep_evm \
+--optimize_augustus \
+--cpus 15
+
+
+# "repeats/repclassifier/05_full_out/fOpsBet2.1_genomic.full_mask.soft.fa"

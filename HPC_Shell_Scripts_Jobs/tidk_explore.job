@@ -1,0 +1,19 @@
+#! /usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J tidk_explore
+#BSUB -e tidk_explore.err
+#BSUB -o tidk_explore.out
+#BSUB -q general
+#BSUB -n 5
+#BSUB -W 160:00
+
+
+tidk explore \
+-m 5 \
+-x 12 \
+--distance 1 \
+-v \
+fOpsBet2.1_genomic_split/all.hifi_reads.part_001.fa \
+1>tidk_explore.stdout \
+2>tidk_explore.stderr

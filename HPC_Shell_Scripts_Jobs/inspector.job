@@ -1,0 +1,17 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=5000]"
+#BSUB -J inspector
+#BSUB -n 8
+#BSUB -e inspector.err
+#BSUB -o inspector.out
+
+inspector.py \
+-c ../raw_reads/obeta_primary_assembly.fa \
+-r ../raw_reads/all.hifi_reads.fastq \
+-o inspector_out/ \
+--datatype hifi
+

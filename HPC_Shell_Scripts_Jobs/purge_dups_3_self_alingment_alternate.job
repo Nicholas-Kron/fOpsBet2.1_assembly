@@ -1,0 +1,25 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J purge_3_alt
+#BSUB -e purge_3_alt.err
+#BSUB -o purge_alt.out
+#BSUB -W 120:00
+#BSUB -n 8
+#BSUB -R "rusage[mem=7500]"
+#BSUB -q bigmem
+
+
+echo $(date -u) "Generating self alignments..."
+
+split_fa alternate_asm_full.fa > alternate_asm_full.split
+
+minimap2 \
+-x asm5 \
+-DP \
+-k 19 \
+-w 19 \
+-m 200 \
+alternate_asm_full.split alternate_asm_full.split | gzip -c - > alternate_asm_full.split.self.paf.gz
+
+echo $(date -u) "Self alignments generated!"
+

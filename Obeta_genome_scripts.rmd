@@ -1,0 +1,3655 @@
+---
+title: "Opsanus beta Genome Assembly"
+output: html_document
+date: "2023-05-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This RMarkdown contains the workflow used to assemble the fOpsBet2.1 Gulf Toadfish (Opsanus beta) genome assembly based upon the Vertebrate Genome Project (VGP) solo HiFi assembly workflow (Other example implementations of the VGP workflow can be found [here](https://training.galaxyproject.org/training-material/topics/assembly/tutorials/vgp_genome_assembly/tutorial.html) or [here](https://dash.harvard.edu/bitstream/handle/1/37375026/FINAL_FINALEdits_Updated_Final_draft_Hachey.pdf?sequence=1). Scaffolding after assembly diverges from VGP using a custom workflow. Following scaffolding, the funannotate piepline was used for gene prediction and annotation. This Rmarkdown contains all the programs, commands, and parameters used. The assembly was built on the University of Miami PEGASUS supercomputer, running CentOS7 and LSF scheduler. The LSF parameters used in job scripts have been omitted because they do not port to other systems, but the actual job scripts run for this analysis with those parameters can be found in the /scripts/jobs folder. Note these scripts may differ slightly as they were build ad hoc as this workflow/pipeline was solidified. However, the commands and parameters used are exactly replicated here. This markdown serves to illustrate all command calls and the form of the workflow in one convenient location for evaluation and for others to lift code and quickly write scripts optimized for their working environment (e.g. HPC cluster, cloud compute environment, local, etc). R and python interspersed among bash is functional and was directly used to generate results tables, figures, or some intermediary files for visualization. 
+
+```{r load modules for R, echo=FALSE,warning=FALSE,message=FALSE}
+
+library(tidyverse)
+
+```
+
+
+# 1. Set up work space
+```{bash set up work space}
+
+WORKDIR=/path/to/working/directory
+##For example ${HOME}/fOpsBet2.1
+
+cd ${WORKDIR}
+mkdir -p raw_reads
+mkdir -p hifiasm
+mkdir -p scaffold
+mkdir -p assemblies #this is a convenience directory to symlink assemblies into
+mkdir -p mitohifi
+mkdir -p stats
+mkdir -p BUSCO
+mkdir -p quast
+mkdir -p funannotate
+
+##transfer hifi read fastqs to your raw_reads folder. 
+### for this project we ran the same library on 3 SMRTcells so I concatenated the hifi fastqs together into one.
+
+```
+
+# 2. Genome profiling using HiFi Reads
+
+## 2.1 estimate best kmer size using merqury
+```{bash estimate best kmer size with merqury, eval=FALSE}
+
+conda activate merqury
+
+#initial estimate
+genome_size=2100000000
+
+#calculate best kmer size
+best_k.sh $genome_size
+#res = 21
+
+#for human genome haploid @ 3.1GB is 21, same for diploid
+#if not sure or don't want to estimate, use 31 from VGP
+
+```
+
+## 2.2 estimate best kmer size manually
+```{r estimate best kmer size with manual calc, eval=FALSE}
+#Alternatively can run this calc where G is gnome size and p is collission rate
+
+G <- 2100000000
+p <-  0.001
+k <-  log(G*(1 - p)/p, 4)
+
+k
+#res = 20.4
+
+#if you want a lower colission rate (ie. 0.000000001), go with 31-mers
+
+```
+
+## 2.3 generate kmer profile with meryl
+```{bash profile kmers with meryl via merqury, eval=FALSE}
+
+cd ${WORKDIR}/raw_reads
+
+echo $(date -u) "building kmer profile from hifi reads with meryl..."
+echo $(meryl --version)
+
+meryl count [k=21 memory=40 threads=8 all.hifi_reads.fastq.gz output hifi_reads.meryl]
+
+echo $(date -u) "kmer profile built! Generating histogram..."
+
+meryl histogram hifi_reads.meryl
+
+echo $(date -u) "Hisogram built! All done."
+
+```
+
+## 2.4 estimate genome params with genomescope2
+
+```{bash estimate genome parameters with genomescope2, eval=FALSE}
+
+cd ${WORKDIR}/raw_reads
+
+echo $(date -u) "generating genome profile from meryl kmers using GenomeScope2..."
+echo $(genomescope2 --version)
+
+#follow VGP naming conventions
+genome="fOpsBet2.1"
+
+genomescope2 \
+-i hifi_reads.hist \
+-o hifi_genomescope2_out \
+-p 2 \
+-k 21 \
+--testing \
+-n $genome
+
+echo $(date -u) "GenomeScope2 profiling all done!"
+
+echo $(date -u) "Extracting parameters for purge dups!"
+
+#genome size
+avg_cov=`awk '{print $3}' ${genomescope2_outdir}/SIMULATED_testing.tsv`
+##transition
+lower_bound=$(python -c "print (round($avg_cov*1.5))")
+##upper bound
+upper_bound=$((lower_bound * 3))
+
+printf "${avg_cov}\t${lower_bound}\t${upper_bound}\n" > bound_stats.txt
+
+```
+
+# 3. Initial assembly with hifiasm with light purging
+
+## 3.1 assamble with hifiasm with -l set to 1 (light purging)
+
+Hifiasm is the premier assembler for the PacBio HIFI CCS reads we generated for this study at the time of this study. The VGP recommends using it in conjunction with the purgeDups pipeline for effective generation of pseudo-haplotype primaryb assemblies in the absence of supplementary information like BioNano optical maps or HiC. Hifiasm has internal duplicate purging capabilities which are very effective and may be sufficient or even superior to purgeDups for your genome. In our testing, Hifiasm duplicate purging alone was not as effective as purgeDups at handling highly repetitive contigs, thus we opted to follow the VGP method here, using hifiasm with light purging informed by genomescope2 kmer profiling followed by more aggressive purging with purgeDups.
+
+```{bash assemble reads with hifiasm, eval=FALSE}
+
+cd ${WORKDIR}/hifiasm
+genome="fOpsBet2.1"
+
+#Assemble raw reads into primary and alternate assemblies using hifiasm
+#select light purging based on VGP recommendations to do Purge_dups later
+
+hifi_reads=${WORKDIR}/raw_reads/all.hifi_reads.fastq.gz
+
+upper_bound=`awk '{print $3}' ${WORKDIR}/raw_reads/hifi_genomescope2_out/bound_stats.txt`
+
+echo $(date -u) "Assembling genome with hifiasm, purging set to light"
+echo $(hifiasm --version)
+
+hifiasm -o ${genome}_hifiasm_l1 \
+-t 16 \
+-f0 \
+-l 1 \
+--primary \
+--purge-max $upper_bound \
+$hifi_reads \
+2> ${genome}_hifiasm_l1.log
+
+# set -l 1 for light purging, -f 0 to disable bloom filter, --primary to output primary and alternate
+# set --purhe-max to $upper_bound calculated from genomescope2
+
+echo $(date -u) "Intial genome assembly complete! Bye..."
+
+#simlink the initial assemblies locally for easier file handling
+ln -s ${genome}_hifiasm_l1.p_ctg.gfa ${genome}_primary_asm.gfa
+ln -s ${genome}_hifiasm_l1.a_ctg.gfa ${genome}_alternate_asm.gfa
+
+```
+
+## 3.2 convert gfas to fastas
+```{bash convert gfa to fa, eval=FALSE}
+
+
+##simple awk script to extract fasta from gfa
+
+echo $(date -u) "converting gfas to fastas"
+
+
+awk '/^S/{print ">"$2;print $3}' ${genome}_primary_asm.gfa > primary_asm.fa
+awk '/^S/{print ">"$2;print $3}' ${genome}_alternate_asm.gfa > alternate_asm.fa
+
+# in gfa files, lines beginning with S are sequence containing lines.
+# the second filed in an S line is the sequence name/header.
+# the third field in S lines is the actual sequences. 
+
+#symlink to assemblies folder for easier file handling for qc and metrics
+ln -s ${genome}_hifiasm_l1.p_ctg.gfa ${WORKDIR}/assemblies/${genome}_primary.fa
+
+echo $(date -u) "gfas converted! Bye"
+
+#if you want to use GFASTATs for this
+
+#conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+##enabled --discover-paths as this is necessary with hifiasm
+## set size calcs (-s) to contig because we are evaluating contigs
+#gfastats -s contig -o primary_asm.fa --discover-paths ${genome}_primary_asm.gfa
+#gfastats -s contig -o alternate_asm.fa --discover-paths ${genome}_alternate_asm.gfa 
+
+
+```
+
+## 3.3 get primary assmbly stats
+### 3.3.1 gfastats
+```{bash get assembly stats with gfatools, eval=FALSE}
+
+#BSUB -n 4
+
+#activate conda env
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=../raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e "Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with gfastats..."
+##enabled --discover-paths as this is necessary with hifiasm
+## set size calcs (-s) to contig because we are evaluating contigs
+for asm in *_asm.fa
+do
+echo $(date -u) "processing ${asm}..."
+gfastats \
+-j 4 \
+--stats  \
+-s c \
+${asm} \
+${genome_size} > ${WORKDIR}/stats/${asm}.gfastats
+
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "gfastats evaluation all done!"
+
+
+
+
+
+```
+
+### 3.3.2 genometools
+```{bash get assembly stats with genometools, eval=FALSE}
+
+#activate conda env
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e"Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with genometools"
+
+for asm in *_asm.fa
+do
+echo $(date -u) "processing ${asm}..."
+gt seqstat \
+-contigs yes \
+-genome $genome_size  > ${WORKDIR}/stats/${asm}.seqstat
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "genometools evaluation all done!"
+
+```
+
+### 3.3.3 Merqury
+```{bash get merqury assessment of initial primary and alternate assembly, eval=FALSE}
+
+conda activate merqury
+
+echo $(date -u) "Evaluating primary and alternate assemblies with Merqury..."
+echo $(merqury.sh --version)
+
+merqury.sh \
+${WORKDIR}/raw_reads/hifi_reads.meryl \
+primary_asm.fa \
+alternate_asm.fa \
+initial
+
+##NOTE when using Merqury on our HPC cluster via a conda environment, MERQURY used the cluster's modules instead of the conda env
+## to fix this, /nethome/n.kron/mambaforge/envs/merqury/share/merqury/util/util.sh had the following lines changed:
+## function check_module()
+##{
+##       module -v 1> /dev/null 2> /dev/null
+##        echo 1
+##}
+## e.g. echo was set to 1 instead of the module
+
+
+```
+
+### 3.3.4 BUSCO
+```{bash get BUSCO of primary assembly, eval=FALSE}
+
+conda activate busco
+
+echo $(date -u) "Assessing gene completeness using BUSCO for primary assembly..."
+echo $(busco --version)
+
+for asm in *_asm.fa
+do
+name=`basename -s .fa ${asm}`
+
+#assess fish buscos
+echo $(date -u) "Assessing ${asm} for ray-finned fishes BUSCO"
+busco \
+-i ${asm} \
+-o ${name}_actinopterygii \
+-m genome \
+-l "actinopterygii" \
+--cpu 4 \
+--scaffold_composition \
+--out_path ${WORKDIR}/BUSCO
+
+echo $(date -u) "Ray-finned fish BUSCOs calulated! Bye..."
+
+done
+
+```
+
+# 4. Extract Mitochondrial genome
+
+```{bash use MitoHifi to get mitochondrial genome, eval =FALSE}
+
+##Look for mitochondrial genome in reads and assembly contigs
+
+cd ${WORKDIR}/mitohifi
+mkdir -p mitohifi_reads
+mkdir -p mitohifi_assembly
+
+conda activate mitohifi_env
+
+##find reference mitochondrial genome from nearest relative
+python /path/to/MitoHifi/3.0.0/findMitoReference.py \
+--species Opsanus beta
+--outfolder ./
+--type mitochondrion
+
+##Our closest relative was Porichthys myriaster (AP006739.1) in Batrachoididae
+#AP006739.1.fasta
+#AP006739.1.gb
+
+cd mitohifi_reads
+
+python /path/to/MitoHiFi/3.0.0/mitohifi.py \
+-r all.hifi_reads.fastq.gz \
+-f ../AP006739.1.fasta \
+-g ../AP006739.1.gb \
+-t 8 \
+-o 2
+
+cd ../mitohifi_assembly
+
+python /path/to/MitoHiFi/3.0.0/mitohifi.py \
+-c ${WORKDIR}/hifiasm/primary_asm.fa \
+-f ../AP006739.1.fasta \
+-g ../AP006739.1.gb \
+-t 8 \
+-o 2
+
+## Both using hifi reads and raw assembly asssembled an identical mitogenome
+## We did not need to remove from assembly manually as Purge_Dups step 
+## purged the contig containing the mitogegnome from both the primary
+## and alternate assemblies. Mito contig added back in at the end of scaffolding.
+
+```
+
+
+# 5. Purge duplicates
+## 5.1 purge primary assembly
+
+```{bash PurgeDups primary, eval=FALSE}
+
+conda activate purge_dups
+
+hifi_reads=${WORKDIR}/raw_reads/all.hifi_reads.fastq.gz
+
+echo $(date -u) "Purging haplotype duplicates from primary assembly with purge_dups..."
+
+
+echo $(date -u) "Aligning hifi reads to primary assembly with minimap2..."
+
+#Align hifi reads to primary assembly with minimap2 with recommended hifiread parameters set
+minimap2 \
+-t 16 \
+-x map-hifi primary_asm.fa $hifi_reads | gzip -c - > primary_asm.paf.gz
+
+
+echo $(date -u) "Primary alignment complete!"
+
+echo $(date -u) "Getting base coverage and statistics files..."
+
+
+#bounds
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+##transition
+lower_bound=`awk '{print $2}' ${genomescope2_outdir}/bound_stats.txt`
+##upper bound
+upper_bound=`awk '{print $3}' ${genomescope2_outdir}/bound_stats.txt`
+
+
+## calculate cutoffs
+pbcstat primary_asm.paf.gz #produces PB.base.cov and PB.stat files
+
+mv PB.base.cov primary_asm_PB.base.cov
+mv PB.stat primary_asm_PB.stat
+
+calcuts \
+-f \
+-m $lower_bound \
+-u $upper_bound \
+-d 0 \
+primary_asm_PB.stat > primary_asm_cutoffs 2>primary_asm_calcults.log
+
+echo $(date -u) "Base coverage and statistics files generated!"
+
+echo $(date -u) "Generating self alignments..."
+
+##Split assembly 
+split_fa primary_asm.fa > primary_asm.split
+
+##align split assembly to itself
+minimap2 \
+-xasm5 \
+-DP \
+-k19 \
+-w 19 \
+-m200 \
+primary_asm.split primary_asm.split | gzip -c - > primary_asm.split.self.paf.gz
+
+echo $(date -u) "Self alignments generated!"
+
+echo $(date -u) "Purging haplotigs and overlaps..."
+
+##purge duplicates
+purge_dups -2 \
+-a 80 \
+-T primary_asm_cutoffs \
+-c primary_asm_PB.base.cov \
+primary_asm.split.self.paf.gz > primary_asm_dups.bed 2> primary_asm_purge_dups.log
+
+## if BUSCO is negatively affected, try adjusting -a parameter from default of 70 up to 75 or 80
+## Based on our tests, setting -a above 80 did not improve BUSCO gains, so we chose -a 80
+
+echo $(date -u) "Haplotigs and overlaps purged!"
+
+echo $(date -u) "Retrieving purged primary and haplotig sequences from draft assembly!"
+
+## extract purged assembly from primary assembly
+get_seqs -e -p primary_asm primary_asm_dups.bed primary_asm.fa  
+
+echo $(date -u) "Sequences retreieved from draft assembly!"
+
+##symlink to assemblies folder for easier file handling during qc and metrics
+ln -s ${genome}_hifiasm_l1.p_ctg.gfa ${WORKDIR}/assemblies/${genome}_primary.purged.fa
+
+```
+
+NOTE: In our final pipeline we set `-a` to 80. We experimented with values from 70 to 95 in increments of 5 and then evaluated the effects on the assembly, using BUSCO completeness, contig number, N50, L50, total genome length, and Merqury kmer profiles. BUSCO duplication and compelteness and Merqury kmer profiles did not improve after setting `-a` to 80, and increasing beyond 80 ran the risk of over-purging the assembly. 
+
+## 5.2 purge alternate assembly
+```{bash PurgeDups alternative, eval=FALSE}
+
+conda activate purge_dups
+
+echo $(date -u) "Purging haplotype duplicates from alternate assembly with purge_dups..."
+
+#merge purged haplotids from primary with alternate
+cat primary_asm.hap.fa  alternate_asm.fa > alternate_asm_full.fa
+
+##same exact process as with primary assembly
+
+echo $(date -u) "Aligning hifi reads to primary assembly with minimap2..."
+
+hifi_reads=${WORKDIR}/raw_reads/all.hifi_reads.fastq.gz
+
+##align hifi reads to alternate assembly with minimap2
+minimap2 \
+-t 16 \
+-x map-hifi alternate_asm_full.fa $hifi_reads | gzip -c - > alternate_asm_full.paf.gz
+
+#bounds
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+##transition
+lower_bound=`awk '{print $2}' ${genomescope2_outdir}/bound_stats.txt`
+##upper bound
+upper_bound=`awk '{print $3}' ${genomescope2_outdir}/bound_stats.txt`
+
+pbcstat alternate_asm_full.paf.gz #produces PB.base.cov and PB.stat files
+
+## calculate cutoffs
+
+mv PB.base.cov alternate_asm_PB.base.cov
+mv PB.stat alternate_asm_PB.stat
+
+calcuts \
+-f \
+-m $lower_bound \
+-u $upper_bound \
+-d 0 \
+alternate_asm_full_PB.stat > alternate_asm_full_cutoffs 2>alternate_asm_full_calcults.log
+
+echo $(date -u) "Base coverage and statistics files generated!"
+
+echo $(date -u) "Generating self alignments..."
+
+##split assembly and align to itself
+
+split_fa alternate_asm_full.fa > alternate_asm_full.split
+minimap2 \
+-xasm5 \
+-DP \
+-k 19 \
+-w 19 \
+-m200 \
+alternate_asm_full.split alternate_asm_full.split | gzip -c - > alternate_asm_full.split.self.paf.gz
+
+echo $(date -u) "Self alignments generated!"
+
+echo $(date -u) "Purging haplotigs and overlaps..."
+
+##purge duplicates
+purge_dups -2 \
+-a 80 \
+-T alternate_asm_full_cutoffs \
+-c alternate_asm_full_PB.base.cov \
+alternate_asm_full.split.self.paf.gz > alternate_asm_full-dups.bed 2> alternate_asm_full_purge_dups.log
+
+##if BUSCO is negatively affected, try adjusting -a parameter from default of 70 up to 75 or 80
+
+#Purge dups was run itteratively adjusting the -a flag from 70 to 95 in incrememnts of five to optimize BUSCO scores (maximize compelteness while minimizing duplication). 
+
+echo $(date -u) "Haplotigs and overlaps purged!"
+
+#extract contigs to get complete altrnate assembly. The leftovers are waste contigs.
+get_seqs -e -p alternate_asm_full alternate_asm_full_dups.bed 
+
+```
+
+## 5.3 get purged assembly stats
+### 5.3.1 gfastats
+```{bash get assembly stats with gfatools, eval=FALSE}
+
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e"Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with gfastats..."
+##enabled --discover-paths as this is necessary with hifiasm
+## set size calcs (-s) to contig because we are evaluating contigs
+for asm in *.purged.fa
+do
+echo $(date -u) "processing ${asm}..."
+gfastats \
+-j 4 \
+--stats \
+-s c \
+${asm} \
+${genome_size} > ${WORKDIR}/stats/${asm}.gfastats
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "gfastats evaluation all done!"
+
+
+```
+
+### 5.3.2 genometools
+```{bash get assembly stats with genometools, eval=FALSE}
+
+#activate conda env
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e"Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with genometools"
+
+for asm in *.purged.fa
+do
+echo $(date -u) "processing ${asm}..."
+gt seqstat \
+-contigs yes \
+-genome $genome_size > ${WORKDIR}/stats/${asm}.seqstat
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "genometools evaluation all done!"
+
+```
+
+### 5.3.3 Merqury
+```{bash get merqury assessment of initial primary and alternate assembly, eval=FALSE}
+
+conda activate merqury
+
+echo $(date -u) "Evaluating primary and alternate assemblies with Merqury..."
+echo $(merqury.sh --version)
+
+merqury.sh \
+${WORKDIR}/raw_reads/hifi_reads.meryl \
+primary_asm_purged.fa \
+alternate_asm_full.purged.fa  \
+purged
+
+
+```
+
+### 5.3.4 BUSCO
+```{bash get BUSCO of primary assembly, eval=FALSE}
+
+conda activate busco
+
+echo $(date -u) "Assessing gene completeness using BUSCO for primary assembly..."
+echo $(busco --version)
+
+for asm in *purged.fa
+do
+name=`basename -s .fa ${asm}`
+
+#assess fish buscos
+echo $(date -u) "Assessing ${asm} for ray-finned fishes BUSCO"
+busco \
+-i ${asm} \
+-o ${name}_actinopterygii \
+-m genome \
+-l "actinopterygii" \
+--cpu 4 \
+--scaffold_composition \
+--out_path ${WORKDIR}/BUSCO
+
+echo $(date -u) "Ray-finned fish BUSCOs calulated! Bye..."
+
+done
+
+```
+
+# 6. Correct assembly with Inspector
+
+Because we do not have trio data (I.E. haplotype kmer data from parents), we do not have a perfectly phased assemblies. Assembly errors such as haplotype switches and other minor errors may incorporated into the primary assembly. To correct for this, We used [Inspector](https://github.com/Maggi-Chen/Inspector), a tool that aligns our high quality HIFI CCS reads to our assembly to identify various errors and then correct them with local reassembly using Flye. 
+
+```{bash correct assembly with inspector, eval=FALSE}
+
+## the following wrapper script runs inspector.py and inspetcory_correct.py on your 
+## assembly, and then symlinks to the corrected assembly to allow for multiple
+## runs of inspector. The end of one round does not start the next so that
+## the assembly can be evaluated between runs to determine how many is enough.
+## in our testing, after 3 runs the returns diminished. This script could be 
+## modified to automatically begin a subsequent round after the current round
+## has completed, but I opted to do this manually to evaluate each round as it
+## ran to completion on our PC cluster. 
+
+cd ${WORKDIR}
+mkdir -p inspector
+cd inspector
+
+hifi_reads=${WORKDIR}/raw_reads/all.hifi_reads.fastq
+
+ln -s ${WORKDIR}/hifiasm/primary_asm.purged.fa current_asm.fa
+
+echo "################################################################################"
+echo "                           prepare for inspector run                            "
+echo "################################################################################"
+
+echo "WARNING: This script assumes it is being run from the inspector working directory!"
+echo "WARNING: This script assumes your assembly has been symlinked to the current_asm.fa!"
+echo "WARNING: This script assumes inspector.py and inspector-correct.py are in your PATH"
+echo "         or in an active conda environment!"
+
+echo "checking for target assembly..."
+
+if [[ ! -e current_asm.fa ]]
+then
+  echo "ERROR: could not find target assembly! Exiting..."
+  exit
+fi
+
+echo "checking for hifi reads..."
+echo "hifi reads path is ${hifi_reads}"
+if [[ ! -f ${hifi_reads} ]] 
+then
+  echo "ERROR: could not find hifi reads! Exiting..."
+  exit
+fi
+
+if [[ ! -d inspector_logs ]] 
+then
+  echo "no directory for inspector logs detected. Creating one now..."
+  mkdir inspector_logs
+  echo "done!"
+fi
+
+if [[ ! -f round.txt ]] 
+then
+  echo "no record of previous runs exists, initializing round in round.txt as round 1"
+  echo "1" > round.txt
+fi
+
+round=`cat round.txt`
+echo "current round is: ${round}"
+echo "current assembly is:" $(ls -lh current_asm.fa)
+
+echo $(date -u) "Begining inspector run..."
+
+echo "################################################################################"
+echo "                             run inspector.py                                   "
+echo "################################################################################"
+
+echo "Running inspector..."
+
+inspector.py \
+-c current_asm.fa \
+-r $hifi_reads \
+-o inspector_round_${round}/ \
+--datatype hifi
+
+echo "inspector run compelte..."
+
+echo "################################################################################"
+echo "                          run inspector-correct.py                              "
+echo "################################################################################"
+
+echo "correcting assembly..."
+
+inspector-correct.py \
+-i inspector_round_${round}/ \
+--datatype pacbio-hifi \
+-o inspector_round_${round} \
+-t 16
+
+echo "assembly corrected..."
+
+echo "################################################################################"
+echo "                              prep next round                                   "
+echo "################################################################################"
+
+echo "sim linking to corrected fasta"
+
+rm current_asm.fa
+
+ln -s inspector_round_${round}/contig_corrected.fa current_asm.fa
+
+echo "current assembly is:" $(ls -lh current_asm.fa)
+
+echo "moving log files to ./inspector_logs"
+
+cp inspector_round_${round}/summary_statistics inspector_logs/round_${round}_summary_statistics.txt
+cp inspector_round_${round}/Inspector.log inspector_logs/round_${round}_Inspector.log
+cp inspector_round_${round}/Inspector_correct.log inspector_logs/round_${round}_Inspector_correct.log
+
+echo "incrementing round..."
+echo "this round was round ${round}"
+round=$((round+1))
+echo ${round} > round.txt
+round=`cat round.txt`
+echo "next round is round ${round}"
+
+echo "################################################################################"
+echo "                           inspector run complete                               "
+echo "################################################################################"
+
+##after desired number of rounds simlink final corrected assembly to the assemblies directory
+##for us, final round was round 3
+
+ln -s inspector_round_${round}/contig_corrected.fa ${WORKDIR}/assemblies/${genome}_primary.purged.inspector${round}.fa
+
+## run inspector one last time to get the stats of your final assembly (ie all code before "run inspector-correct.py" )
+
+```
+
+NOTE: Inspector was able to correct the vast majority of identified errors in the primary assembly, but not all. Some fo these appeared to be due to problems with Flye. Ultimately, we decided to run Inspector 3 times as after this point the returns on compute time in terms of errors identified and corrected had diminished. 
+
+# 7. Scaffolding
+## 7.1 Scaffold assembly with ntLINK
+
+```{bash scaffolding with ntLINK, eval=FALSE}
+
+cd ${WORKDIR}/scaffold
+mkdir -p ntlink
+cd ntlink
+
+ln -s ${WORKDIR}/assemblies/${genome}_primary_asm.purged.inspector${round}.fa current_asm
+ln -s ${WORKDIR}/raw_reads/all.hifi_reads.fastq hifi_reads.fastq 
+
+## scaffold purged assembly using hifi reads with 5 rounds of ntLINK
+## we used run_rounds_gaps to run ntLink itteratively and gap fill
+## minimum gap size (g) is set to 100. This is to match gap size given in RagTag
+## minimizer size (w) set to 250 based on ntlink example script (experiment to find best one)
+
+ntLink_rounds run_rounds_gaps \
+t=5 \
+g=100 \
+v=1 \
+rounds=5 \
+w=250 \
+target=current_asm.fa \
+reads=hifi_reads.fastq
+
+##For us, gap filling only identified fill-able gaps in the first round
+##We also did not see any new scaffolding success after 3 rounds
+
+##symlink to assemblies folder for downstream qc and metrics
+ln -s current_asm.fa.k32.w250.z1000.ntLink.gap_fill.5rounds.fa ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.ntlink5.fa
+
+```
+
+## 7.1 Super-Scaffold to fThaAma1.1 with RagTag
+
+```{bash super scaffold with RagTag using close relative, eval=FALSE}
+
+cd ${WORKDIR}/scaffold
+mkdir -p ragtag
+cd ragtag
+
+ln -s ../ntlink/*gap_fill.5rounds.fa current_asm
+ln -s ${WORKDIR}/raw_reads/GCF_902500255.1_fThaAma1.1_genomic.fna fThaAma1.1_genomic.fa
+
+##super-scaffold the ntlinks assembly using the chromosome leve assembly of nearest relative (a toadfish in the same family)
+ragtag.py scaffold -t 15 fThaAma1.1_genomic.fa current_asm.fa
+
+##symlink to assemblies folder for downstream qc and metrics
+ln -s ragtag_out/ragtag_output/ragtag.scaffold.fasta ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.ntlink5.ragtag.fa
+
+```
+
+## 7.3 Use Kraken2 to identify contamination in scaffolds
+
+```{bash run kraken2 on scaffolds, eval=FALSE}
+
+conda activate kraken
+
+cd ${WORKDIR}
+mkdir -p kraken
+cd kraken
+
+ln -s ragtag_out/ragtag_output/ragtag.scaffold.fasta ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.ntlink5.ragtag.fa
+
+#Softamsek super-scaffolded assembly with dustmaker from NCBI BLAST+ as recomended by Kraken devs to prevent unwanted hits
+
+## code lifted from VGP assembly pipeline https://github.com/VGP/vgp-assembly/tree/master/pipeline/VGP_decontamination
+
+if [[ ! -f fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa  ]]
+then
+
+echo "Soft masking assembly with dustmaker..."
+
+tr a-z A-Z < fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.fa | \
+    dustmasker -level 40 -out fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa -outfmt 'fasta'
+fi
+
+if [[ ! -f fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa  ]]
+then
+echo "Converting dusted genome to hard masked..."
+
+tr [:lower:] 'N' < fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa > fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa
+
+echo "Hard masked genome generated. Continuing to contaminant screen..."
+
+fi
+
+echo "Begin contaminant screen with Kraken2..."
+
+DBNAME=/path/to/kraken2/db
+##we used k2_pluspf_20230605
+
+asm="fOpsBet2.1"
+
+kraken2 \
+--db $DBNAME \
+--threads 8 \
+--conf 0.30 \
+--report ${asm}_sequences.report \
+--use-names \
+--output ${asm}_sequences.kraken \
+--classified-out ${asm}.classified.fasta \
+--unclassified-out ${asm}.unclassified.fasta \
+fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa
+
+
+##Kraken2 did not identify any contaminants so we did not have to remove anything
+
+```
+
+## 7.4 Screen for adapter contaminants using fcsadaptor
+
+```{bash screen for contaminants with fcsadaptor, eval=FALSE}
+
+##fcsadapter requires DOCKER so make sure you have that installed and working
+
+cd ${HOME}/Programs/local
+git clone https://github.com/ncbi/fcs.git
+chmod +x fcs/dist/run_fcsadaptor.sh
+export PATH=${PATH}:~/local/fcs/dist
+
+cd ${WORKDIR}/assemblies
+
+mkdir fcsadaptor 
+cd fcsadaptor
+
+mkdir -p outputdir
+
+ln -s ../scaffolding/ragtag/ragtag_out/.fasta
+
+run_fcsadaptor.sh \
+--fasta-input fOpsBet2.1_primary_purged_inspector3_ntlinks5_ragtag.fa \
+--output-dir outputdir \
+--container docker
+--euk
+
+##for our assembly, fcs adapter did not idnetify any contaminating sequences
+
+```
+
+## 7.5 get scaffolded assembly stats 
+### 7.5.1 gfastats
+```{bash get assembly stats with gfatools, eval=FALSE}
+
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e"Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with gfastats..."
+##enabled --discover-paths as this is necessary with hifiasm
+## set size calcs (-s) to contig because we are evaluating contigs
+for asm in ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.*.fa
+do
+echo $(date -u) "processing ${asm}..."
+gfastats \
+-j 4 \
+--stats \
+-s c \
+${asm} \
+${genome_size} > ${WORKDIR}/stats/${asm}.gfastats
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "gfastats evaluation all done!"
+
+
+```
+
+### 7.5.2 genometools
+```{bash get assembly stats with genometools, eval=FALSE}
+
+#activate conda env
+conda activate genome_qc 
+## genome_qc contains gfastats, genomescope2, genometools-genometools 
+
+#get genome size from genomescope2 size estimate from kmers
+genome="fOpsBet2.1"
+genomescope2_outdir=${WORKDIR}/raw_reads/hifi_genomescope2_out
+
+genome_size=$(grep -e"Genome Haploid Length" \
+${genomescope2_outdir}/${genome}_summary.txt | sed 's/,//g ; s/bp//g' | awk '{print $5}')
+
+echo $(date -u) "Screening assemblies with genometools"
+
+for asm in ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.*.fa
+do
+echo $(date -u) "processing ${asm}..."
+gt seqstat \
+-contigs yes \
+-genome $genome_size > ${WORKDIR}/stats/${asm}.seqstat
+echo $(date -u) "finished processing ${asm}!"
+done
+
+echo $(date -u) "genometools evaluation all done!"
+
+```
+
+### 7.5.3 BUSCO
+```{bash get BUSCO for scaffolded assemblies}
+
+
+conda activate busco
+
+echo $(date -u) "Assessing gene completeness using BUSCO for primary assembly..."
+echo $(busco --version)
+
+for asm in ${WORKDIR}/assemblies/fOpsBet2.1_primary.purged.inspector3.*.fa
+do
+name=`basename -s .fa ${asm}`
+
+#assess fish buscos
+echo $(date -u) "Assessing ${asm} for ray-finned fishes BUSCO"
+busco \
+-i ${asm} \
+-o ${name}_actinopterygii \
+-m genome \
+-l "actinopterygii" \
+--cpu 4 \
+--scaffold_composition \
+--out_path ${WORKDIR}/BUSCO
+
+echo $(date -u) "Ray-finned fish BUSCOs calulated! Bye..."
+
+done
+
+```
+
+
+# 8. Post assembly and scaffolding assessments
+## 8.1  compile assemblies statistics for all assemblies
+### 8.1.1 get BUSCO for previous assembly and relative with chromosome level assembly
+
+```{bash get BUSCO of primary assembly, eval=FALSE}
+
+conda activate busco
+
+echo $(date -u) "Assessing gene completeness using BUSCO for realatives..."
+echo $(busco --version)
+
+#GCA_900660325.1_Opsanus_beta_assembly_genomic.fna and GCF_902500255.1_fThaAma1.1_genomic.fna 
+
+for asm in ${WORKDIR}/raw_reads/*_genomic.fna
+do
+name=`basename -s .fa ${asm}`
+
+#assess fish buscos
+echo $(date -u) "Assessing ${asm} for ray-finned fishes BUSCO"
+busco \
+-i ${asm} \
+-o ${name}_actinopterigii \
+-m genome \
+-l "actinopterigii" \
+--cpu 4 \
+--scaffold_composition \
+--out_path ${WORKDIR}/BUSCO
+
+echo $(date -u) "Ray-finned fish BUSCOs calulated! Bye..."
+
+done
+
+```
+
+### 8.1.2 compile BUSCO across assemblies
+```{bash compile buscos, eval=FALSE}
+
+cd ${WORKDIR}/BUSCO
+
+echo $(date -u) "Compiling BUSCO plots..."
+
+cp BUSCO/*/short_summary.*.txt BUSCO/
+
+generate_plot.py -wd BUSCO
+
+```
+
+```{bash parse buscos, echo=FALSE, message=FALSE, error=FALSE}
+
+for file in ./BUSCO/*.txt
+do
+#grep out relevant information
+NAME=`basename -s "_actinopterygii.txt" $file | sed 's/short_summary[.]specific[.]actinopterygii_odb10[.]//g'`
+#echo $NAME debug
+grep -e "Complete BUSCOs (C)\|Complete and single-copy BUSCOs (S)\|Complete and duplicated BUSCOs (D)\|Fragmented BUSCOs (F)\|Missing BUSCOs (M)" $file | awk -F"\t" 'OFS = "\t" {print $3,$2}' > ./BUSCO/${NAME}.busco
+#this one is less safe because it assume where stuff is
+#awk -F"\t" 'NR >=10 && NR <=14{print $3,$2}' $file
+done
+
+
+
+
+```
+
+```{r plot buscos, echo=FALSE, message=FALSE, error=FALSE}
+
+files <- list.files(path="./BUSCO", pattern = ".busco", full.names = TRUE)
+busco_data <- lapply(files, FUN = function(f){
+  df <- read.delim(f, 
+           header =FALSE, 
+           sep = "\t",
+           col.names = c("Category","Count")) %>%
+    mutate(
+      assembly = basename(f) %>% str_remove(".busco"),
+      Code = str_sub(Category, - 2, - 1) %>%  str_sub(., 1, 1),
+      Category = case_when(
+      Category == "Complete and single-copy BUSCOs (S)" ~ "Complete (C) and single-copy (S)", 
+      Category == "Complete and duplicated BUSCOs (D)" ~ "Complete (C) and duplicated (D)",
+      TRUE ~ Category
+    ) %>% str_remove(., "BUSCOs"),
+    Category = factor(Category, 
+                      levels = c("Complete  (C)",
+                             "Complete (C) and single-copy (S)",	
+                             "Complete (C) and duplicated (D)",
+                             "Fragmented  (F)",
+                             "Missing  (M)"
+                             ))
+    )
+  total = sum( (df %>% filter( Code != "C"))$Count)
+  df <- df %>% mutate( Prop = round(Count/total*100,2))
+}) %>% do.call("rbind",.) 
+  
+  
+busco_data <- busco_data %>% rowwise() %>%
+  mutate(
+    name = case_when(
+      assembly == "GCA_900660325.1_Opsanus_beta_assembly" ~ c("fOpsBet1.1\nGCA_900660325.1"),
+      assembly == "GCF_902500255.1_fThaAma1.1" ~ c("fThaAma1.1\nGCF_902500255.1"),
+      str_detect(assembly, "fOpsBet") ~ paste0(str_split_1(assembly, "_")[1],"\n", str_split(assembly, "_")[[1]] %>% tail(.,1)),
+      TRUE ~ assembly
+    )
+  )
+
+labs <- busco_data %>%
+  group_by(name) %>%
+  summarise(label = paste("C:", Count[1], " [S:", Count[2], ", D:", Count[3], "], F:", Count[4], ", M:", Count[5], ", n:", sum(Count[2:4]), sep=""))
+
+
+my_colors <- c("#56B4E9", "#3492C7", "#F0E442", "#F04442")
+busco_data %>%
+  filter(Code != "C") %>%
+  ggplot(data =., aes(x = name, y = Prop, fill = Category)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+   annotate(geom = "text", y=3, x = labs$name,  label=labs$label, size = 2.5, colour = "black", hjust=0, fontface = "bold") +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  labs(y  = "% BUSCO", x = "", title = "BUSCO Assessment Results\n Actinopterygii_odb10", fill = "") +
+  theme(legend.position = "top",
+        plot.title = element_text(hjust = 0.5),
+        axis.text = element_text(family = "sans", face = "bold", color = "black")) +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))+
+    coord_flip() 
+
+```
+
+```{r plot only BUSCO for final assembly and other other genomes, echo=FALSE, message=FALSE, error=FALSE}
+labs2 <- filter(labs,str_detect(string = name, pattern = "ragtag|fThaAma|GCA"))%>%
+  mutate(
+    name = case_when(
+      str_detect(name,"ragtag") ~ "Opsanus beta\n(this study)",
+      str_detect(name,"ThaAma") ~ "Thalassophryne amazonica\n(GCF_902500255.1)",
+      str_detect(name,"GCA") ~ "Opsanus beta\n(GCA_900660325.1)",
+      TRUE ~ "?"
+    ))
+busco_data %>%
+  filter(str_detect(string = name, pattern = "ragtag|fThaAma|GCA")) %>%
+  mutate(
+    name = case_when(
+      str_detect(name,"ragtag") ~ "Opsanus beta\n(this study)",
+      str_detect(name,"ThaAma") ~ "Thalassophryne amazonica\n(GCF_902500255.1)",
+      str_detect(name,"GCA") ~ "Opsanus beta\n(GCA_900660325.1)",
+      TRUE ~ "?"
+    )
+  ) %>%
+  filter(Code != "C") %>%
+  ggplot(data =., aes(x = name, y = Prop, fill = Category)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+   annotate(geom = "text", y=3, x = labs2$name,  label=labs2$label, size = 3.5, colour = "black", hjust=0, fontface = "bold") +
+  scale_fill_manual(values = my_colors) +
+  theme_classic() +
+  labs(y  = "% BUSCO", x = "", fill = "", title = "BUSCO Assessment Results\n Actinopterygii_odb10",
+       ) +
+  theme(legend.position = "top",
+        text = element_text(family = "sans", color = "black"),
+        plot.title = element_text(hjust = 0.50, face = "bold"),
+        legend.text = element_text(size = 8, face = "bold", color = "black"),
+        axis.text = element_text(family = "sans", face = "bold", color = "black"),
+        ) +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))+
+    coord_flip() 
+ggsave(filename = "./BUSCO/BUSCO_Figure.pdf",device = "pdf",width = 7, height = 4)
+
+```
+
+
+### 8.1.3 QUAST on all assemblies to compare
+
+```{bash get quast report of all assemblies, eval=FALSE}
+
+##symlink previous assembly and nearest relative into assemblies directory
+ln -s ${WORKDIR}/raw_reads/GCA_900660325.1_Opsanus_beta_assembly_genomic.fna \
+${WORKDIR}/assemblies/fOpsBet1.1.fa
+
+ln -s ${WORKDIR}/raw_reads/GCF_902500255.1_fThaAma1.1_genomic.fna \
+${WORKDIR}/assemblies/fThaAma1.1.fa
+
+cd ${WORKDIR}/quast
+
+conda activate quast
+
+#get genome statistics across all assemblies to compare 
+quast.py \
+-t 8 \
+--eukaryote \
+--large \
+--k-mer-stats \
+--k-mer-size 31 \
+${WORKDIR}/assemblies/*.fa
+
+
+```
+
+### 8.1.4 compile genometools stats
+
+```{r compile genometools stats, echo = FALSE, warning=FALSE, error=FALSE}
+
+files <-  list.files("Stats/genometools/", full.names = TRUE)
+genometools <- lapply(files, function(x){
+  
+  read.delim(x, sep = ":", header = FALSE, skip = 1, col.names = c("metric", basename(x) %>% str_remove(.,".fa.seqstat")))
+  
+}) %>% Reduce(x=., f = "merge")
+
+write_delim(genometools, "Stats/genometools/combined.seqstat", quote = "none", delim = "\t")
+
+```
+
+### 8.1.4 compile gfasts stats
+
+```{r compile genometools stats, echo = FALSE, warning=FALSE, error=FALSE}
+
+files <-  list.files("Stats/gfastats/", full.names = TRUE)
+gfastats <- lapply(files, function(x){
+  
+  read.delim2(x, header = FALSE, skip = 1) %>%
+    separate(., V1, sep = ": ", into = c("metric",
+                                         basename(x) %>%
+                                           str_remove(.,".fa.gfastats")
+                                         ))
+  
+}) %>% Reduce(x=., f = "merge")
+
+write_delim(gfastats, "Stats/gfastats/combined.gfastats", quote = "none", delim = "\t")
+
+```
+
+
+## 8.2 sort and rename scaffolds
+```{bash sort the assembly according to length, eval=FALSE}
+
+cd ${WORKDIR}/assemblies
+
+## Use gfa stats to get a record of original scaffold names and sizes
+## This is because we will sort and rename according to size.
+## Saving this allows us to remember which scaffolds mapped to which 
+## chromosomes in the fThaAma assembly.
+
+conda activate genome_qc
+gfastats -s s fOpsBet2.1_primary_purged_inspector3_ntlinks5_ragtag.fa > super_scaffold_size.txt
+
+## Sort and rename according to legnth with funannotate.
+## This is the assembly we will submit to the NCBI Genome repository
+## for review before we move on to annotation with funannotate. 
+
+conda activate funannotate
+funannotate sort \
+-i fOpsBet2.1_primary_purged_inspector3_ntlinks5_ragtag.fa \
+-o fOpsBet2.1_genomic.fa
+-b scaffold
+
+## Get newly renamed scaffold lengths to allow mapping of old to new
+conda activate genome_qc
+gfastats -s s fOpsBet2.1_genomic.fa > funannotate_scaffold_size.txt
+
+## From this we observed 23 >30Mb scaffolds (the expected number of chromosomes for Toadfishes)
+## with remaining 39 scaffolds at <4Mb.
+
+```
+
+```{r}
+
+scaff_compare <- inner_join(
+read.delim("Stats/funannotate_scaffold_size.txt", header = FALSE, sep= "\t", 
+           col.names = c("funannotate_scaff", "length")),
+read.delim("Stats/super_scaffold_size.txt", header = FALSE, sep= "\t", 
+           col.names = c("ragtag_scaff", "length"))) %>%
+  filter(str_detect(ragtag_scaff, "NC")) %>%
+  mutate(ThaAma_scaff = str_remove(ragtag_scaff,"_RagTag")) %>%
+  inner_join(
+    read.delim("Stats/ThaAmaChroms.txt", header = TRUE, sep = "\t")
+  ) %>%
+  mutate(prop = length/ThaAma_lenght * 100)
+
+
+rev(scaff_compare$ThaAma_scaff)
+
+```
+
+
+## 8.3 find telomeric regions
+
+##8.3.1 find most common telomeric repeats
+```{bash look for telomeric sequence monomers, eval=FALSE}
+
+GENOME=fOpsBet2.1
+
+cd ${WORKDIR}
+
+mkdir -p ${WORKDIR}/repeats/tidk
+cd ${WORKDIR}/repeats/tidk
+
+conda activate tidk
+
+##split all hifi reads into 100 chunks for parallel processing
+seqkit split -p 100 -O ./${GENOME}_genomic_split ../../../raw_reads/all.hifi_reads.fa
+
+cd ./${GENOME}_genomic_split
+
+##run tidk explore on all hifi reads to identify dominant telomeric repeats
+##submit one job per split to LSF
+
+for FILE in *.part_*.fa
+do
+COMMAND="tidk explore -m 5 -x 12 --distance 1 -v fOpsBet2.1_genomic_split/$FILE 1>${FILE}_tidk_explore.out 2>${FILE}_tidk_explore.stderr"
+
+echo "submitting job for $FILE"
+echo $COMMAND
+
+bsub -P coral_omics -J tidk_$(basename $FILE) -e tidk_$(basename $FILE).err -o tidk_$(basename $FILE).out -q general -n 5 -W 48:00 exec ${COMMAND}
+
+done
+
+echo "All done"
+
+##get header
+head -n1 all.hifi_reads.part_001.fa_tidk_explore.out > ${GENOME}_genomic_tidk_explore.out
+
+## get all tidk results for each split
+for FILE in  *part_*.fa_tidk_explore.out
+do
+tail -n +2 ${FILE} >> ${GENOME}_genomic_tidk_explore.out
+done
+
+
+```
+
+```{r}
+
+telomeres <- read.delim("repeats/fOpsBet2.1_genomic_tidk_explore.out", header = TRUE, sep = "\t") %>%
+  group_by(canonical_repeat_unit) %>%
+  summarise(count = sum(count)) %>% 
+  arrange(desc(count))
+
+write.table(telomeres, "repeats/Opsanus_beta_canonical_repeat_units.txt", sep = "\t", quote = FALSE)
+
+```
+
+
+##8.3.1 find most common telomeric regions
+```{bash look for telomeres, eval=FALSE}
+
+GENOME=fOpsBet2.1
+
+##tidk explore on assemblies
+
+tidk explore --log -m 5 -x 12 ${WORKDIR}/assemblies/${GENOME}_primary.fa > ${GENOME}_primary_telomeric.out
+
+tidk explore --log -m 5 -x 12 ${WORKDIR}/assemblies/${GENOME}_primary_purged.fa > ${GENOME}_purged_telomeric.out
+
+tidk explore --log -m 5 -x 12 ${WORKDIR}/assemblies/${GENOME}_genomic.fa > ${GENOME}_genomic_telomeric.out
+
+#Telomeric repeats from Merlo et al. 2007
+#DOI: 10.1007/s10709-006-9131-4
+
+##telomeres
+tidk search \
+--string AACCCT \
+--output fOpsBet2.1 \
+--dir . \
+--extension bedgraph \
+fOpsBet2.1_genomic.fa
+
+##GATAn repeats
+tidk search \
+--string GATA \
+--output fOpsBet2.1_5srDNA \
+--dir . \
+--extension tsv	\
+${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa
+
+
+
+```
+
+```{r look at telomere repeat results, echo = FALSE, message = FALSE, warning=FALSE, fig.width=7}
+
+telomeres <- read.delim("telomeres/fOpsBet2.1_telomeres_telomeric_repeat_windows.tsv", sep = "\t") %>%
+  filter(id %in% paste0("scaffold_", seq(1,23,1)) )
+
+telomeres  %>%
+  ggplot(data = ., aes(x = window)) +
+  geom_line(data = telomeres, aes(y = forward_repeat_number), color = "red") +
+  geom_line(data = telomeres, aes(y = -1 * reverse_repeat_number), color = "blue") +
+  theme_classic() +
+  facet_wrap(facets = ~id, scales = "free")
+
+telomeres <- read.delim("telomeres/fOpsBet2.1_telomeres_telomeric_repeat_windows.tsv", sep = "\t") 
+
+telo_for_circos <- telomeres %>% mutate(end = ceiling(window/2000000)*2000000,
+                     start = end -2000000 + 1,
+                     total = forward_repeat_number + reverse_repeat_number) %>%
+  group_by(id, start, end) %>%
+  summarise(total = sum(total),
+            fwd = sum(forward_repeat_number),
+            rev = sum(reverse_repeat_number))
+
+write_delim(telo_for_circos %>% select(id, start, end, total),
+            "circos/genome_plot/fOpsBet2.1_genomic.telomere_total.bedgraph", 
+            col_names = FALSE, delim = "\t")
+write_delim(telo_for_circos %>% select(id, start, end, fwd),
+            "circos/genome_plot/fOpsBet2.1_genomic.telomere_fwd.bedgraph", 
+            col_names = FALSE, delim = "\t")
+write_delim(telo_for_circos %>% select(id, start, end, rev),
+            "circos/genome_plot/fOpsBet2.1_genomic.telomere_rev.bedgraph", 
+            col_names = FALSE, delim = "\t")
+
+```
+
+```{r look at GATA repeat results, echo = FALSE, message = FALSE, warning=FALSE, fig.width=7}
+
+
+GATA <- read.delim("telomeres/fOpsBet2.1_GATA_telomeric_repeat_windows.tsv", sep = "\t")  %>% 
+  filter(id %in% paste0("scaffold_", seq(1,23,1)) )
+
+GATA  %>%
+  mutate(id = factor(id, levels = paste0("scaffold_", seq(1,23,1)))) %>%
+  ggplot(data = ., aes(x = window)) +
+  geom_line(data = GATA, aes(y = forward_repeat_number), color = "red") +
+  geom_line(data = GATA, aes(y = -1 * reverse_repeat_number), color = "blue") +
+  theme_classic() +
+  facet_wrap(facets = "id", scales = "free")
+
+GATA <- read.delim("telomeres/fOpsBet2.1_GATA_telomeric_repeat_windows.tsv", sep = "\t") 
+
+gata_for_circos <- GATA %>% mutate(end = ceiling(window/2000000)*2000000,
+                     start = end -2000000 + 1,
+                     total = forward_repeat_number + reverse_repeat_number) %>%
+  group_by(id, start, end) %>%
+  summarise(total = sum(total),
+            fwd = sum(forward_repeat_number),
+            rev = sum(reverse_repeat_number))
+
+write_delim(gata_for_circos %>% select(id, start, end, total),
+            "circos/genome_plot/fOpsBet2.1_genomic.GATA_total.bedgraph", 
+            col_names = FALSE, delim = "\t")
+write_delim(gata_for_circos %>% select(id, start, end, fwd),
+            "circos/genome_plot/fOpsBet2.1_genomic.GATA_fwd.bedgraph", 
+            col_names = FALSE, delim = "\t")
+write_delim(gata_for_circos %>% select(id, start, end, rev),
+            "circos/genome_plot/fOpsBet2.1_genomic.GATA_rev.bedgraph", 
+            col_names = FALSE, delim = "\t")
+
+gata_for_circos %>% arrange(total)
+
+```
+
+
+## 8.4 find satelite DNA
+
+### 8.4.1 run TRASH to get monomers
+```{bash repeats with TRASH, eval = FALSE}
+
+GENOME=fOpsBet2.1
+
+mkdir -p ${WORKDIR}/repeats/TRASH
+cd ${WORKDIR}/repeats/TRASH
+
+TRASH_run.sh \
+--simpleplot \
+--par 0 \
+--randomseed 777 \
+${GENOME}_genomic.fa 
+
+#correct MS dos line endings
+tr '\r' '\n' < TRASH_fOpsBet2.1_genomic.fa.gff >  TRASH_fOpsBet2.1_genomic.fa.gff3
+
+```
+
+```{r look at repeat summary, echo = FALSE, error=FALSE, warning=FALSE, fig.width = 7}
+
+TRASH <- read.delim("repeats/TRASH/Summary.of.repetitive.regions.fOpsBet2.1_genomic.fa.csv", 
+           header = TRUE, sep = ",") %>%
+  filter(consensus.count > 0) %>%
+  mutate(pos = (start+end)/2,
+         len_10 = ceiling(most.freq.value.N/10)*10,
+         len_cat = paste0(len_10-9,"-", len_10),
+         bases = consensus.count * most.freq.value.N)
+TRASH %>%
+mutate(window_end = ceiling(end/2000000)*2000000,
+                     window_start = window_end -2000000 + 1
+                     ) %>%
+  group_by(window_end, window_start, name) %>%
+  summarise(sum = sum(bases)) %>%
+  mutate(prop = sum/2000000) %>%
+  ggplot(aes(x = (window_start+window_end)/2, y= sum)) +
+  #geom_bar(stat="identity") +
+  geom_line() +
+  facet_wrap(facets = ~name, scales = "free")
+
+###writeout bedfile for circos
+TRASH %>%
+mutate(window_end = ceiling(end/2000000)*2000000,
+                     window_start = window_end -2000000 + 1
+                     ) %>%
+  group_by(window_end, window_start, name) %>%
+  summarise(sum = sum(bases)) %>%
+  mutate(prop = sum/2000000) %>%
+  select(name, window_start, window_end, prop) %>%
+  write_delim(., "circos/genome_plot/TRAH_satelite_prop.bedgraph", col_names = FALSE)
+```
+
+### 8.4.2 investigate putative centromere in scaffold_1
+```{r investigate scaffold_1 centromere, echo = FALSE, error=FALSE, warning=FALSE, fig.width = 7}
+
+## Centromere on scaffold 1? Huge block of satellite DNA
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 60000000  & end < 86000000) %>%
+  group_by(consensus.primary) %>%
+  summarise(sum = sum(bases), n = mean(most.freq.value.N))
+
+#0.1 - 5 MB for centromere
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 60000000  & end < 86000000) %>%
+  group_by(most.freq.value.N) %>%
+  summarise(sum = sum(consensus.count)) %>%
+  ggplot(aes(x = most.freq.value.N, y = sum, label = most.freq.value.N)) +
+  geom_point() +
+  geom_bar(stat = "identity") +
+  geom_text()
+
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  #filter(start > 77500000  & end < 87500000) %>%
+  ggplot(., aes(xmin = start, xmax = end, ymin = 0, ymax = bases, fill = as.character(most.freq.value.N))) +
+  geom_rect() 
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 80000000  & end < 85000000) %>%
+  ggplot(., aes(x = (start + end) /2, xmin = start, xmax = end, ymin = 0, ymax = 1, fill = as.character(most.freq.value.N))) +
+  geom_rect() +
+  theme_classic() +
+  labs(x = "position", fill = "Monomer Size")+
+  theme(axis.text.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "top")
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 82000000  & end < 83000000) %>%
+  ggplot(., aes(x = (start + end) /2, xmin = start, xmax = end, ymin = 0, ymax = 1, fill = as.character(most.freq.value.N), label = as.character(most.freq.value.N))) +
+  geom_rect() +
+  geom_text_repel(y = 0.5)
+
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(most.freq.value.N == 45) %>% arrange(desc(start))
+
+#ACTTTTTGTTTACTCTGTGTGCTGGGGCCAACAGGTCAGAATAAG
+#82278000 - 82848999
+584955/1000000 # 0.58 megabases
+#82854000 - 82879999
+22815/1000000 # 0.023 megabases
+
+TRASH$consensus.primary %>% unique() %>% length()
+TRASH %>% group_by(most.freq.value.N) %>% summarise( count = n()) %>% arrange(desc(count))
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 77500000  & end < 87500000) %>%
+  select(consensus.primary, bases, width, consensus.count, most.freq.value.N) %>% 
+  group_by(consensus.primary) %>%
+  summarise(width = sum(width), bases = sum(bases), consensus.count=sum(consensus.count), most.freq.value.N = unique(most.freq.value.N)) %>%
+  arrange(desc(width))
+
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  ggplot(., aes(xmin = start, xmax = end, ymin = 0, ymax = 1, fill = as.character(consensus.primary))) +
+  geom_rect() +
+  theme(legend.position = "none")
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 77500000  & end < 87500000) %>%
+  ggplot(., aes(xmin = start, xmax = end, ymin = 0, ymax = 1, fill = as.character(consensus.primary))) +
+  geom_rect() +
+  theme(legend.position = "none")
+
+
+```
+
+```{r render scaffold_1 centromere and pericentromere, echo = FALSE, error=FALSE, warning=FALSE, fig.height = 1, fig.width=7}
+
+TRASH %>% 
+  filter(name == "scaffold_1") %>%
+  filter(start > 80000000  & end < 85000000) %>%
+  ggplot(., aes(x = (start + end) /2, xmin = start, xmax = end, ymin = 0, ymax = 1, fill = as.character(most.freq.value.N))) +
+  geom_rect() +
+  theme_classic() +
+  labs(x = "Position", fill = "Monomer Size:")+
+  theme(axis.text.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "top",
+        text = element_text(color = "black", face = "bold")) + 
+  guides(fill = guide_legend(nrow = 1))
+
+ggsave(filename = "repeats/TRASH/scaffold_1_centro.pdf", device = "pdf", width = 7, height = 2)
+
+
+```
+
+### 8.4.2.1 run HiCAT
+```{bash HiCAT analysis of scaffold_1 centromere-like region, eval = FALSE}
+
+##get HiCAT https://github.com/xjtu-omics/HiCAT
+
+#install
+conda install -c xjtuomics hicat
+#test
+hicat -i ./testdata/cen21.fa -t ./testdata/AlphaSat.fa
+
+###only use centromeric region for analysis
+
+##make bedfile for putative scaffold_1 centromere
+printf "scaffold_1\t82000000\t83000000\n" > ${WORKDIR}/repeats/TRASH/scaffold_1_centro.bed
+
+##generate fasta of only scaffold_1:82000000-83000000 which contains centromere-like sequence
+bedtools getfasta -fi ${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa -fo ${WORKDIR}/repeats/TRASH/scaffold_1_centro.fa -bed scaffold_1_centro.bed -name -fullHeader
+
+##run HiCAT to analyze region
+python ./HiCAT.py -i ${WORKDIR}/repeats/TRASH/scaffold_1_centro.fa -t ${WORKDIR}/repeats/TRASH/main_45mer.fa -th 10 -o ${WORKDIR}/repeats/TRASH/main_45mer_HiCAT
+
+
+```
+
+### 8.4.2.2 run StainedGlass
+```{bash use StainedGlass to visualize putative scaffold_1 centromere, eval = FALSE}
+
+#NOTE need to make a snakemake conda env and download StainedGlass
+#FROM THE STAINEDGLASS github
+
+##get snakemake
+mamba create -n snakemake -c conda-forge -c bioconda snakemake
+
+##get stained glass
+conda activate snakemake
+git clone https://github.com/mrvollger/StainedGlass.git
+
+##index input_fasta
+samtools faidx ${WORKDIR}/repeats/TRASH/main_45mer_HiCAT/input_fasta.1.fa
+
+##run StainedGlass to get centromere data
+#### window size of 2000
+snakemake --use-conda --cores 15 make_figures --config sample=scaffold_1 fasta=${WORKDIR}/repeats/TRASH/main_45mer_HiCAT/input_fasta.1.fa
+
+
+```
+
+
+## 8.5 alignment rates to final assembly
+
+### 8.5.1 download public short read data
+
+```{bash get raw short read data, eval = FALSE}
+
+mkdir -p ${WORKDIR}/raw_reads/short_reads_dna
+cd  ${WORKDIR}/raw_reads/short_reads_dna
+
+##sample_list was build manually. SRA run accessions are from 
+#PRJNA196921 - original genome assembly raw data
+#PRJEB30779 - single run from University of Oslo
+# PRJNA720393 - single run from NOAA  
+
+for run in `cat sample_list.txt`
+do
+fasterq-dump $run
+gzip ${run}*
+done
+
+```
+
+
+### 8.5.2 BWA-mem2 index of genome
+
+```{bash bwa-mem2 index, eval = FALSE}
+
+GENOME=fOpsBet2.1
+
+mkdir -p ${WORKDIR}/alignment
+cd ${WORKDIR}/alignment
+
+bwa-mem2 index ${GENOME}_genomic.fa
+
+```
+
+### 8.5.3 align samples to assembly with bwa-mem2
+
+```{bash align reads to assembly, eval = FALSE}
+
+GENOME=fOpsBet2.1
+
+## WARNING: running in series like this is super inefficient. This code nicely
+## illustrates the command run and that it was run across all samples. However,
+## in practice, I used a scrip that writes individual commands for each sample
+## and submits those as individual jobs to the LSF on our HPC so as to run the
+## alignments in parallel. The actual scripts are available in the ./scripts
+## folder. 
+
+for sample in `cat sample_list.txt`
+do
+bwa-mem2 mem \
+-t 16 \
+${GENOME}_genomic.fa \
+${sample}_1.fastq.gz \
+${sample}_2.fastq.gz | samtools view -bh -o ${sample}_align.bam -
+
+## get bam stats
+samtools flagstat ${sample}_align.bam > ${sample}_align.bam.stats
+
+done
+
+
+##for example
+#command="bwa-mem2 mem -t 16 ${GENOME}_genomic.fa ${sample}_1.fastq.gz #${sample}_2.fastq.gz | samtools view -bh -o ${sample}_aling.bam -"
+#bsub -P coral_omics -q bigmem -n 16 -J ${sample}_align -e ${sample}_align.err -o #${sample}_align.out eval ${command}
+
+##Example result
+cat SRR2034069_align.bam.stats
+#65282670 + 0 in total (QC-passed reads + QC-failed reads)
+#63916688 + 0 primary
+#0 + 0 secondary
+#1365982 + 0 supplementary
+#0 + 0 duplicates
+#0 + 0 primary duplicates
+#64222865 + 0 mapped (98.38% : N/A)
+#62856883 + 0 primary mapped (98.34% : N/A)
+#63916688 + 0 paired in sequencing
+#31958344 + 0 read1
+#31958344 + 0 read2
+#48077094 + 0 properly paired (75.22% : N/A)
+#62261224 + 0 with itself and mate mapped
+#595659 + 0 singletons (0.93% : N/A)
+#12791906 + 0 with mate mapped to a different chr
+#6931769 + 0 with mate mapped to a different chr (mapQ>=5)
+
+
+```
+
+
+### 8.5.4 use minimap2 to get alignment rates of HiFi reads
+
+```{bash, eval = FALSE}
+
+GENOME=fOpsBet2.1
+
+minimap2 \
+-t 16 \
+-a \
+-x map-hifi \
+../assemblies/fOpsBet2.1_genomic.fa $hifi_reads | samtools view -bh -o hifi2final.bam -
+
+samtools sort -o hifi2final.sort.bam hifi2final.bam
+
+samtools index hifi2final.sort.bam
+
+samtools flagstat hifi2final.sort.bam > hifi2final.sort.stats
+
+#flagstat out:
+#12146876 + 0 in total (QC-passed reads + QC-failed reads)
+#7923384 + 0 primary
+#2888210 + 0 secondary
+#1335282 + 0 supplementary
+#0 + 0 duplicates
+#0 + 0 primary duplicates
+#12146634 + 0 mapped (100.00% : N/A)
+#7923142 + 0 primary mapped (100.00% : N/A)
+#0 + 0 paired in sequencing
+#0 + 0 read1
+#0 + 0 read2
+#0 + 0 properly paired (N/A : N/A)
+#0 + 0 with itself and mate mapped
+#0 + 0 singletons (N/A : N/A)
+#0 + 0 with mate mapped to a different chr
+#0 + 0 with mate mapped to a different chr (mapQ>=5)
+
+```
+
+### 8.5.5 use minimap2 to align old assembly to new
+
+```{bash, eval = FALSE}
+
+minimap2 -ax asm5 fOpsBet2.1_genomic.fa GCA_900660325.1_fOpsBet1.1.fa | samtools sort -o old2new.bam -O BAM -@ 8 -
+samtools index -@ 8 old2new.bam
+samtools flagstat old2new.bam
+
+#513969 + 0 in total (QC-passed reads + QC-failed reads)
+#345629 + 0 primary
+#147794 + 0 secondary
+#20546 + 0 supplementary
+#0 + 0 duplicates
+#0 + 0 primary duplicates
+#505723 + 0 mapped (98.40% : N/A)
+#337383 + 0 primary mapped (97.61% : N/A)
+#0 + 0 paired in sequencing
+#0 + 0 read1
+#0 + 0 read2
+#0 + 0 properly paired (N/A : N/A)
+#0 + 0 with itself and mate mapped
+#0 + 0 singletons (N/A : N/A)
+#0 + 0 with mate mapped to a different chr
+#0 + 0 with mate mapped to a different chr (mapQ>=5)
+
+```
+
+
+# 9. Repeat Masking
+
+Repetitive regions within a genome can confuse gene prediction software. Transposable elements can often have full ORFs that resemble real genes for example. Before robust methods to avoid this were developed, the first genomes for human for example erroneously estimated gene counts in the 100s of thousands. To eliminate this bias, repetitive elements within genomes are masked, ie changed from upper case ACGT to either N (hard mask) or lowercase (e.g. acgt, soft mask). This allows gene prediction/modeling software to ignore uninformative or confounding regions. To identify repetitive regions, we run RepeatModeler which identifies repetitive regions from the genome and generates models for us to use down stream. Think of this like gene prediction but for repeats. We can then use the repeatitive elements modeled by RepeatModeler to maks our assembly for downstream applications. Becasue this process isn't foolproof, we supplement the de novo repeats from RepeatModeler with curated repeat databases. Because in this study we are assembling a fish genome, we opted to supplement our de novo repeats with curated repeats from [FishTEDB](https://www.fishtedb.org), a database of repetitive elements from several fish species. Conveniently, FishTEDB includes a repeat database from T. amazonica, the close relative we used for Chromosome-scale scaffolding to build our pseudo-chromosome level assembly. 
+
+## 9.1 model repetitive elements with RepeatModeler
+```{bash model repeats, eval=FALSE}
+
+mkdir -p ${WORKDIR}/repeats
+cd ${WORKDIR}/repeats
+
+ln -s ${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa fOpsBet2.1_genomic.fa
+
+conda activate repeatmodeling
+#contains RepeatModeler/masker, trf, ltr_finder, ltr_retriever,  plus some utilities
+
+##Build blast db for assembly
+BuildDatabase -name fOpsBet2.1_genomic fOpsBet2.1_genomic.fa
+
+##model repeats
+RepeatModeler -database fOpsBet2.1_genomic \
+-pa 5 \
+-LTRStruct \
+1>fOpsBet2.1_repmodel.out \
+2>fOpsBet2.1_repmodel.err
+
+
+```
+
+## 9.2 purge repeat database of true protein coding genes
+
+Some actual protein coding genes can have repetitive structures that can confuse software like RepeatModeler and be classified as transposable elements. As recommended by the [user guide](https://blaxter-lab-documentation.readthedocs.io/en/latest/filter-repeatmodeler-library.html), we should use curated protein databases to remove these misclassified, bonefide protein coding genes from our predicted TE set.
+
+### 9.2.1 remove repetitie elements from uniprot fasta
+```{bash blast uniprot db to remove repetitive elements, eval=FALSE}
+
+##from RepeatModeler manual https://blaxter-lab-documentation.readthedocs.io/en/latest/filter-repeatmodeler-library.html
+
+blastp -query /path/to/uniprot_sprot.fasta \
+       -db RepeatPeps/RepeatPeps.lib \
+       -outfmt '6 qseqid staxids bitscore std sscinames sskingdoms stitle' \
+       -max_target_seqs 25 \
+       -culling_limit 2 \
+       -num_threads 15 \
+       -evalue 1e-5 \
+       -out /path/to/databases/uniprot_sprot.fasta.vs.RepeatPeps.25cul2.1e5.blastp.out
+       
+#Get sequence IDs of uniprot proteins that have a hit to repetitive elements
+awk '{print $1}' uniprot_sprot.fasta.vs.RepeatPeps.25cul2.1e5.blastp.out > TE_hits.txt
+
+#get protein sequence ids from uniprot fasta
+grep -e ">" uniprot_sprot.fasta > prot_headers.txt 
+
+#get only sequence ids of proteins without significant hit to repetitive elements
+grep -vFf TE_hits.txt prot_headers.txt | sed 's/>//g' > prot_headers_no_TE.txt
+
+##extract sequences that do not have blast hits to known repetitive elements
+seqkit grep -f prot_headers_no_TE.txt uniprot_sprot_no_TE.fasta
+
+
+```
+
+### 9.2.2 remove de novo repeat database of likely false postitives 
+```{bash clean out de novo repeat database of real protein, eval=FALSE}
+
+/nethome/n.kron/coral_omics/databases
+
+blastx -query fOpsBet2.1-families.fa \
+       -db /path/to/databases/uniprot_sprot_no_TE.fasta \
+       -outfmt '6 qseqid staxids bitscore std sscinames sskingdoms stitle' \
+       -max_target_seqs 25 \
+       -culling_limit 2 \
+       -num_threads 15 \
+       -evalue 1e-10 \
+       -out repeatmodeller_lib.vs.transcripts.no_tes.25cul2.1e10.blastx.out
+
+awk '{print $1}' repeatmodeller_lib.vs.transcripts.no_tes.25cul2.1e10.blastx.out > prot_hits.txt
+
+#get protein sequence ids from uniprot fasta
+grep -e ">" fOpsBet2.1-families.fa > TE_headers.txt 
+
+#get only sequence ids of proteins without significant hit to repetitive elements
+grep -vFf prot_hits.txt TE_headers.txt | sed 's/>//g' > TE_headers_no_prot.txt
+
+##extract sequences that do not have blast hits to known repetitive elements
+seqkit grep -nf TE_headers_no_prot.txt RepeatModeler/fOpsBet2.1_genomic-families.fa > fOpsBet2.1_genomic-families_no_prot.fa
+
+#wc -l
+#109,386 RepeatModeler/fOpsBet2.1_genomic-families.fa
+# 90,862 fOpsBet2.1_genomic-families_no_prot.fa
+
+```
+
+
+## 9.3 Repeat classification and masking
+### 9.3.1 set up for repclassifier
+```{bash prep repclassifier, eval=FALSE}
+
+##code lifted and modified from tutorial by Daren Card
+## https://darencard.net/blog/2022-07-09-genome-repeat-annotation/
+
+GENOME=fOpsBet2.1_genomic
+
+mkdir -p ${WORKDIR}/repeats/repclassfier
+cd ${WORKDIR}/repeats/repclassfier
+
+
+cat ../${GENOME}-families_no_prot.fa | seqkit fx2tab | \
+awk -vgenome="${GENOME}" '{ print genome_$0 }' | seqkit tab2fx > ${GENOME}-families.prefix.fa
+
+##split repeats into known and unknown sequences
+cat ${GENOME}-families.prefix.fa | seqkit fx2tab | \
+grep -v "Unknown" | seqkit tab2fx > ${GENOME}-families.prefix.fa.known
+
+cat ${GENOME}-families.prefix.fa | seqkit fx2tab | \
+grep "Unknown" | seqkit tab2fx > ${GENOME}-families.prefix.fa.unknown
+
+# quantify number of classified elements
+grep -c ">" ${GENOME}-families.prefix.fa.known
+# quantify number of unknown elements
+grep -c ">" ${GENOME}-families.prefix.fa.unknown
+
+printf "Type\tCount\nKnown\t%d\nUnknown\t%d\n" $(grep -c ">" ${GENOME}-families.prefix.fa.known) $(grep -c ">" ${GENOME}-families.prefix.fa.unknown) > ${GENOME}_reps_known_unknown_count.txt
+
+```
+
+### 9.3.2 Initial rep classifier classification
+```{bash repclassifier round 1, eval=FALSE}
+
+GENOME=fOpsBet2.1_genomic
+cd ${WORKDIR}/repeats/repclassfier
+
+# classifying unknowns (-u): run with 5 threads/cores (-t) and using the Actinopterygii elements (-d) from Dfam 
+# and known elements (-k) from the same reference genome; append newly identified elements to the existing known 
+# element library (-a) and write results to an output directory (-o)
+repclassifier -t 5 -d Actinopterygi -u ${GENOME}-families.prefix.fa.unknown \
+-k ${GENOME}-families.prefix.fa.known -a ${GENOME}-families.prefix.fa.known \
+-o round-1_DfamActinopterygii-Self
+
+##Database was master Dfam 3.3, note Dfam is weird and Actinopterygii lacks the terminal i
+## 7898 Actinopterygi (synonym), Actinopterygii (scientific name), bony fishes (blast name), fish <bony fishes> (common name), fishes <bony fishes> (common name), Osteichthyes <bony fishes> (in-part), ray-finned fishes (genbank common name)
+
+# classifying unknowns (-u): run with 5 threads/cores (-t) and using only the known elements (-k) from the 
+# same reference genome; append newly identified elements to the existing known element library (-a) and 
+# write results to an output directory (-o). No Dfam classification is used here.
+repclassifier -t 5 -u round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.unknown \
+-k round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known \
+-a round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known -o round-2_Self
+
+
+```
+
+### 9.3.3 RepeatMasker round 1 - simple repeats
+```{bash repeat masker round 1, eval=FALSE}
+
+GENOME=fOpsBet2.1_genomic
+
+mkdir -p logs 01_simple_out 02_actinopterygii_out 03_known_out 04_unknown_out
+
+# round 1: annotate/mask simple repeats
+RepeatMasker -pa 16 \
+-a \
+-e ncbi \
+-dir 01_simple_out \
+-noint \
+-xsmall \
+${WORKDIR}/assemblies/${GENOME}.fa \
+2>&1 | tee logs/01_simplemask.log
+
+# round 1: rename outputs
+rename fa simple_mask 01_simple_out/${GENOME}*
+rename .masked .masked.fa 01_simple_out/${GENOME}*
+
+```
+
+### 9.3.4 RepeatMasker round 2 - actinopterygii specific repeats
+```{bash repeat masker round 2, eval=FALSE}
+GENOME=fOpsBet2.1_genomic
+
+# round 2: annotate/mask Actinopterygii elements sourced from Dfam using output from 1st round of RepeatMasker
+RepeatMasker -pa 16 \
+-a \
+-e ncbi \
+-dir 02_actinopterygii_out \
+-nolow \
+-species Actinopterygi \
+01_simple_out/${GENOME}.simple_mask.masked.fa \
+2>&1 | tee logs/02_actinopterygiimask.log
+# round 2: rename outputs
+rename simple_mask.masked.fa actinopterygii_mask 02_actinopterygii_out/${GENOME}*
+rename .masked .masked.fa 02_actinopterygii_out/${GENOME}*
+
+
+```
+
+### 9.3.5 RepeatMasker round 3 - known elements from de novo
+```{bash repeat masker round 3, eval=FALSE}
+GENOME=fOpsBet2.1_genomic
+
+# round 3: annotate/mask known elements sourced from species-specific de novo repeat library using output froom 2nd round of RepeatMasker
+RepeatMasker -pa 16 \
+-a \
+-e ncbi \
+-dir 03_known_out \
+-nolow \
+-lib round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.known \
+02_actinopterygii_out/${GENOME}_actinopterygii_mask.masked.fa \
+2>&1 | tee logs/03_knownmask.log
+# round 3: rename outputs
+rename actinopterygii_mask.masked.fa known_mask 03_known_out/${GENOME}*
+rename .masked .masked.fa 03_known_out/${GENOME}*
+
+
+```
+
+### 9.3.6 RepeatMasker round 4 - unknown elements from de novo
+```{bash repeat masker round 4, eval=FALSE}
+GENOME=fOpsBet2.1_genomic
+
+# round 4: annotate/mask unknown elements sourced from species-specific de novo repeat library using output froom 3nd round of RepeatMasker
+RepeatMasker -pa 16 \
+-a \
+-e ncbi \
+-dir 04_unknown_out -nolow \
+-lib round-1_DfamActinopterygii-Self/round-1_DfamActinopterygii-Self.unknown \
+03_known_out/${GENOME}.known_mask.masked.fa 2>&1 | tee logs/04_unknownmask.log
+
+# round 4: rename outputs
+rename known_mask.masked.fa unknown_mask 04_unknown_out/${GENOME}*
+rename .masked .masked.fa 04_unknown_out/${GENOME}*
+
+```
+
+### 9.3.7 combine RepeatMasker results
+```{bash combine repeatmasker results, eval=FALSE}
+
+GENOME=fOpsBet2.1_genomic
+
+# create directory for full results
+mkdir -p 05_full_out
+
+# combine full RepeatMasker result files - .cat.gz
+cat 01_simple_out/${GENOME}.simple_mask.cat.gz \
+02_actinopterygii_out/${GENOME}.actinopterygii_mask.cat.gz \
+03_known_out/${GENOME}.known_mask.cat.gz \
+04_unknown_out/${GENOME}.unknown_mask.cat.gz \
+> 05_full_out/${GENOME}.full_mask.cat.gz
+
+# combine RepeatMasker tabular files for all repeats - .out
+cat 01_simple_out/${GENOME}.simple_mask.out \
+<(cat 02_actinopterygii_out/${GENOME}.actinopterygii_mask.out | tail -n +4) \
+<(cat 03_known_out/${GENOME}.known_mask.out | tail -n +4) \
+<(cat 04_unknown_out/${GENOME}.unknown_mask.out | tail -n +4) \
+> 05_full_out/${GENOME}.full_mask.out
+
+# copy RepeatMasker tabular files for simple repeats - .out
+cat 01_simple_out/${GENOME}.simple_mask.out > 05_full_out/${GENOME}.simple_mask.out
+
+# combine RepeatMasker tabular files for complex, interspersed repeats - .out
+cat 02_actinopterygii_out/${GENOME}.actinopterygii_mask.out \
+<(cat 03_known_out/${GENOME}.known_mask.out | tail -n +4) \
+<(cat 04_unknown_out/${GENOME}.unknown_mask.out | tail -n +4) \
+> 05_full_out/${GENOME}.complex_mask.out
+
+# combine RepeatMasker repeat alignments for all repeats - .align
+cat 01_simple_out/${GENOME}.simple_mask.align \
+02_actinopterygii_out/${GENOME}.actinopterygii_mask.align \
+03_known_out/${GENOME}.known_mask.align \
+04_unknown_out/${GENOME}.unknown_mask.align \
+> 05_full_out/${GENOME}.full_mask.align
+```
+
+### 9.3.8 summarise repeat data
+```{bash summarise repeats, eval=FALSE}
+GENOME=fOpsBet2.1_genomic
+
+ln -s ../../assemblies/fOpsBet2.1_genomic.fa fOpsBet2.1_genomic.fa 
+
+# resummarize repeat compositions from combined analysis of all RepeatMasker rounds
+ProcessRepeats -a -species actinopretygii 05_full_out/${GENOME}.full_mask.cat.gz 2>&1 | tee logs/05_fullmask.log
+
+# calculate the length of the genome sequence in the FASTA
+allLen=`seqtk comp ${GENOME}.fa | datamash sum 2`; 
+# calculate the length of the N sequence in the FASTA
+nLen=`seqtk comp ${GENOME}.fa | datamash sum 9`; 
+# tabulate repeats per subfamily with total bp and proportion of genome masked
+cat 05_full_out/${GENOME}.full_mask.out | tail -n +4 | awk -v OFS="\t" '{ print $6, $7, $11 }' | 
+awk -F '[\t/]' -v OFS="\t" '{ if (NF == 3) print $3, "NA", $2 - $1 +1; else print $3, $4, $2 - $1 +1 }' | 
+datamash -sg 1,2 sum 3 | grep -v "\?" | 
+awk -v OFS="\t" -v genomeLen="${allLen}" '{ print $0, $3 / genomeLen }' > 05_full_out/${GENOME}.full_mask.tabulate
+
+#summarise repeat landscape
+#code from https://github.com/4ureliek/Parsing-RepeatMasker-Outputs
+allLen=`seqtk comp ${GENOME}.fa | datamash sum 2`;
+parseRM.pl -v -i 05_full_out/${GENOME}.full_mask.align -p -g ${allLen} -l 50,1 2>&1 | tee logs/06_parserm.log
+
+##compress big files
+find . -type f -name "*.align" | sort | while read file; do gzip ${file}; done
+
+
+```
+
+### 9.3.9 generate repeat landscapes
+
+Here we are taking the `.align` output of RepeatMasker from setting the `-a` flag and using it to generate summaries of the repeat landscape for some analysis. By looking at the repeat landscape, we can determine how if any families are undergoing expansion or contraction and rouhgly how recently this has occurred. It can also serve as a sort of sanity check if we see something unusual, such as very high or low proportion of the genome flagged as repeats.
+
+WARNING: Note that the script `calcDivergenceFromAlign.pl` has a parameter set that makes it non-functional when operating from a conda environment. It will not look for the perl module `SearchResult.pm` in the appropriate place. This module lives in `/path/to/<conda|mamba>/envs/<RepeatMaskerEnv>/share/RepeatMasker/`, but the way the script is set up it will only look in `share/RepeatMasker/bin` or `<RepeatMaskerEnv>/bin`. To change this, we need to change like 87 from `use lib "/home/rhubley/projects/RepeatMasker";` to `use lib "/path/to/<conda|mamba>/envs/<RepeatMaskerEnv>/share/RepeatMasker/";`. The script will then run normally. 
+
+#### 9.3.9.1 O. beta repeat landscapes
+```{bash calculate landscapes with RepeatModeler utility, eval = FALSE}
+
+export PATH=$PATH:/PATH/TO/CONDA/envs/repeatmodeling/share/RepeatMasker
+
+GENOME=fOpsBet2.1_genomic
+allLen=`seqtk comp ../${GENOME}.fa | datamash sum 2`
+
+#generate landscapes using RepeatMasker scripts
+
+#need to modify the perl script to look for the right perl bin
+#the @INC statment needs to be modified 
+## lines 87 need to be changed from
+#use lib "/home/rhubley/projects/RepeatMasker";
+# to
+#use lib "/PATH/TO/CONDA/envs/repeatmodeling/share/RepeatMasker";
+#to find proper perl modules
+
+calcDivergenceFromAlign.pl -s ${GENOME}.full_mask.divsum ${GENOME}.full_mask.align.gz
+
+createRepeatLandscape.pl -div ${GENOME}.full_mask.divsum -g ${allLen} ${GENOME}.full_mask.align.gz > ${GENOME}.full_mask.align.html
+
+```
+
+NOTE: I was too lazy to write a script to extract the figure data from the html file so I did it manually with some regex stuff in a text editor. A script would not be hard to write to pull the stuff out, however. Either way, the pie chart and bar chart data from the plot muust be extracted for the figure that follows.
+
+#### 9.3.9.2 T. amazonica repeat landscapes
+
+```{bash calculate landscapes with RepeatModeler utility, eval = FALSE}
+
+GENOME=fThaAma1.1_genomic.fa
+
+#soft mask ThaAma genome using FishTEDB ThaAma repeats
+RepeatMasker -pa 10 \
+-a \
+-gff \
+-e ncbi \
+-dir . \
+-xsmall \
+-lib ../Thalassophryne_amazonica.txt \
+${GENOME}
+
+export PATH=$PATH:/PATH/TO/CONDA/envs/repeatmodeling/share/RepeatMasker
+
+
+
+allLen=`seqtk comp ${GENOME} | datamash sum 2`
+
+#generate landscapes using RepeatMasker scripts
+
+#had to modify calcDivergenceFromAlign.pl to 
+### TODO: Remove this
+#use lib "/nethome/n.kron/mambaforge/envs/repeatmodeling/share/RepeatMasker/";
+#to find proper perl modules
+
+calcDivergenceFromAlign.pl -s ${GENOME}.divsum ${GENOME}.align.gz
+
+createRepeatLandscape.pl -div ${GENOME}.divsum -g ${allLen} ${GENOME}.align.gz > ${GENOME}.align.html
+
+```
+
+#### 9.3.9.3 O. beta plot
+```{r plot landscape, fig.width=5}
+
+library(cowplot)
+genome_size = 2151823914
+
+
+### pie chart 
+Rfam_pie <- read.delim(file = "repeats/rep_landscape/fOpsBet2.1_genomic.full_mask.align.html.piechart.txt", header = TRUE, sep = "\t") %>% 
+  rowwise() %>%
+  mutate(Class = factor(Class, levels = rev(Class)),
+         prop = round(count/genome_size*100,1),
+         label = ifelse(prop > 5, paste0(prop,"%"),NA),
+         label2 = ifelse(prop > 5, as.character(Class),NA)) %>%
+  rowwise() %>%
+  mutate(label2 = ifelse(
+    str_detect(label2,"/"),
+    str_split_fixed(label2,"/",n = 2)[[2]], label2),
+    Family = as.character(Class),
+    Family= ifelse(
+    str_detect(Family,"/"),
+    str_split_fixed(Family,"/",n = 2)[[1]], Family)
+  )
+
+Rfam_pie %>% group_by(Family) %>%
+  summarise(count = sum(count),
+            prop = round(count/genome_size*100,1))
+
+pie_colors <- Rfam_pie$color
+names(pie_colors) <-  Rfam_pie$Class
+
+pie <- Rfam_pie %>%
+  ggplot(., aes(x="", y= prop, fill= Class, label = label)) +
+  geom_bar(stat="identity", width=1, 
+           position = position_stack(reverse = TRUE),
+             color = "white", size = 0.2) +
+  geom_text( aes(x = 1.25),
+             color = "white", 
+             position = position_stack(vjust = 0.5,
+                                       reverse = TRUE),
+             fontface = "bold",
+             size = 3.75) +
+  coord_polar("y", start=0) +
+  labs(fill = "") +
+  scale_fill_manual(values = pie_colors) +
+  theme_minimal() +
+  theme(
+    axis.line = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.text = element_text(face = "bold", color= "black")
+  )
+
+### get legend
+plot_legend <- cowplot::get_legend(pie)
+
+pie <- pie +
+  geom_label(aes(x = 1.65, label = label2), color = "white", 
+             position = position_stack(vjust = 0.6,
+                                       reverse = TRUE),
+             hjust = 0.5,
+             fontface = "bold",
+             size = 3) + theme(legend.position = "none")
+  
+## barchart
+
+Rfam <- read.delim(file = "repeats/rep_landscape/fOpsBet2.1_genomic.full_mask.align.html.txt", header = TRUE, sep = "\t") %>% t() %>% as.data.frame() %>% rownames_to_column("Rclass") %>%
+  mutate(Rclass = str_replace(Rclass, "[.]", "/") %>% str_replace(., "[.]", "-")) %>% pivot_longer(data =., cols = -Rclass, names_to = "val", values_to = "prop") %>%
+  select(-val) %>% mutate(bin = rep(seq(1,51,1),42)-0.5) 
+
+Rfam <- Rfam %>% mutate(Rclass = factor(Rclass, levels = rev(Rfam$Rclass %>% unique())))
+
+bar <- Rfam %>%  ggplot(data =., aes(x = bin, y = prop, fill = Rclass)) +
+   geom_bar(stat = "identity", position = "stack", color = "white", size = 0.2) +
+   scale_fill_manual(values = pie_colors) +
+  theme_minimal() +
+  theme(axis.ticks = element_blank(),
+        text = element_text(family = "sans", face = "bold", color = "black", size = 12),
+        legend.position = "none",
+        panel.grid = element_blank()) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "Kimura Substitution Level (CpG adjusted)", 
+       y = "% of Genome")
+
+
+
+one <- ggdraw(bar) +
+  draw_plot(pie, .4, .4, .6, .6)
+
+Obeta_repeats <- plot_grid(one, plot_legend, rel_widths = c(0.6,0.4))
+
+save_plot(Obeta_repeats, file = "./figures/Obeta_repeat_landscape.pdf", base_width = 10, base_height = 6)
+
+Rfam_pie %>% arrange(desc(count))
+
+```
+
+
+#### 9.3.9.4 T.amazonica plot
+```{r plot landscape, fig.width=5}
+
+library(cowplot)
+genome_size = 2151823914
+
+
+### pie chart 
+Rfam_pie <- read.delim(file = "repeats/rep_landscape/fThaAma1.1_genomic.fa.align.piechart.txt", header = TRUE, sep = "\t") %>% 
+  rowwise() %>%
+  mutate(Class = factor(Class, levels = rev(Class)),
+         prop = round(count/genome_size*100,1),
+         label = ifelse(prop > 5, paste0(prop,"%"),NA),
+         label2 = ifelse(prop > 5, as.character(Class),NA)) %>%
+  rowwise() %>%
+  mutate(label2 = ifelse(
+    str_detect(label2,"/"),
+    str_split_fixed(label2,"/",n = 2)[[2]], label2),
+    Family = as.character(Class),
+    Family= ifelse(
+    str_detect(Family,"/"),
+    str_split_fixed(Family,"/",n = 2)[[1]], Family)
+  )
+
+Rfam_pie %>% group_by(Family) %>%
+  summarise(count = sum(count),
+            prop = round(count/genome_size*100,1))
+
+pie <- Rfam_pie %>%
+  ggplot(., aes(x="", y= prop, fill= Class, label = label)) +
+  geom_bar(stat="identity", width=1, 
+           position = position_stack(reverse = TRUE),
+             color = "white", size = 0.2) +
+  geom_text( aes(x = 1.25),
+             color = "white", 
+             position = position_stack(vjust = 0.5,
+                                       reverse = TRUE),
+             fontface = "bold",
+             size = 3.75) +
+  coord_polar("y", start=0) +
+  labs(fill = "") +
+  scale_fill_manual(values = pie_colors) +
+  theme_minimal() +
+  theme(
+    axis.line = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.text = element_text(face = "bold", color= "black")
+  )
+
+### get legend
+plot_legend <- cowplot::get_legend(pie)
+
+pie <- pie +
+  geom_label(aes(x = 1.65, label = label2), color = "white", 
+             position = position_stack(vjust = 0.6,
+                                       reverse = TRUE),
+             hjust = 0.5,
+             fontface = "bold",
+             size = 3) + theme(legend.position = "none")
+  
+## barchart
+
+Rfam <- read.delim(file = "repeats/rep_landscape/fThaAma1.1_genomic.fa.align.html.txt", header = TRUE, sep = "\t") %>% t() %>% as.data.frame() %>% rownames_to_column("Rclass") %>%
+  mutate(Rclass = str_replace(Rclass, "[.]", "/") %>% str_replace(., "[.]", "-")) %>% pivot_longer(data =., cols = -Rclass, names_to = "val", values_to = "prop") %>%
+  select(-val) %>% mutate(bin = rep(seq(1,52,1),38)-0.5) 
+
+Rfam <- Rfam %>% mutate(Rclass = factor(Rclass, levels = names(pie_colors) ) )
+
+bar <- Rfam %>%  ggplot(data =., aes(x = bin, y = prop, fill = Rclass)) +
+   geom_bar(stat = "identity", position = "stack", color = "white", size = 0.2) +
+   scale_fill_manual(values = pie_colors) +
+  theme_minimal() +
+  theme(axis.ticks = element_blank(),
+        text = element_text(family = "sans", face = "bold", color = "black", size = 12),
+        legend.position = "none",
+        panel.grid = element_blank()) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "Kimura Substitution Level (CpG adjusted)", 
+       y = "% of Genome")
+
+
+
+one <- ggdraw(bar) +
+  draw_plot(pie, .4, .4, .6, .6)
+
+Tama_repeats <- plot_grid(one, plot_legend, rel_widths = c(0.6,0.4))
+
+save_plot(Tama_repeats, file = "./figures/Tamazoncia_repeat_landscape.pdf", base_width = 10, base_height = 6)
+
+Rfam_pie %>% arrange(desc(count))
+
+```
+
+
+### 9.3.10 generate GFF3 for repeats
+```{bash generate mask repeats GFF3, eval=FALSE}
+
+GENOME=fOpsBet2.1_genomic
+
+# use Daren's custom script to convert .out to .gff3 for all repeats, simple repeats only, and complex repeats only
+rmOutToGFF3custom -o 05_full_out/${GENOME}.full_mask.out > 05_full_out/${GENOME}.full_mask.gff3
+rmOutToGFF3custom -o 05_full_out/${GENOME}.simple_mask.out > 05_full_out/${GENOME}.simple_mask.gff3
+rmOutToGFF3custom -o 05_full_out/${GENOME}.complex_mask.out > 05_full_out/${GENOME}.complex_mask.gff3
+
+```
+
+### 9.3.11 generate masked genomes
+```{bash make masked genome fastas, eval=FALSE}
+
+GENOME=fOpsBet2.1
+
+# create masked genome FASTA files
+# create simple repeat soft-masked genome
+bedtools maskfasta -soft -fi ${GENOME}_genomic.fa \
+-bed 05_full_out/${GENOME}_genomic.simple_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.simple_mask.soft.fa
+
+# create complex repeat hard-masked genome
+bedtools maskfasta -fi 05_full_out/${GENOME}_genomic.simple_mask.soft.fa \
+-bed 05_full_out/${GENOME}_genomic.complex_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.simple_mask.soft.complex_mask.hard.fa
+
+# create full soft-masked genome
+bedtools maskfasta soft -fi ${GENOME}_genomic.fa \
+-bed 05_full_out/${GENOME}_genomic.full_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.full_mask.soft.fa
+
+```
+
+
+# 10. Gene prediciton
+
+## 10.1 set up funannotate pipeline
+```{bash prepare funannotate, eval=FALSE}
+
+mamba create -n funannotate -c bioconda -c conda-forge funannotate
+
+#install GeneMark-ES/ET (http://topaz.gatech.edu/GeneMark/license_download.cgi).
+#Build used = `GeneMark-ES/ET/EP+ ver 4.71_lic
+# put unpacked genemark tar into /your/mambaforge/envs/funannotate/opt
+#remember to also have your GeneMark key, gm_key, in your home directory as .gm_key
+conda activate funannotate
+
+##install eggnog-mapper for downstream applications
+mamba install -c bioconda eggnog-mapper
+
+mamba env config vars list
+
+mamba env config vars set GENEMARK_PATH=/path/to/mambaforge/envs/funannotate/opt/gmes_linux_64
+mamba env config vars set FUNANNOTATE_DB=/path/to/coral_omics/databases/funannotate_db
+mamba env config vars set PASAHOME=/path/to/mambaforge/envs/funannotate/opt/pasa-2.5.2
+mamba env config vars set EGGNOG_DATA_DIR=/path/to/databases/eggnog_db
+mamba env config vars set TRINITYHOME=/path/to/mambaforge/envs/funannotate/opt/trinity-2.8.5
+
+mamba activate funannotate
+
+echo $FUNANNOTATE_DB
+echo $TRINITYHOME
+echo $PASAHOME
+echo $GENEMARK_PATH
+echo $EGGNOG_DATA_DIR
+
+#donwload the eggnog database into our directory
+#this is interactive so cannot be run from a job
+download_eggnog_data.py 
+
+```
+
+```{bash set up funannotate, eval=FALSE}
+
+conda activate funannotate
+
+##sets up all necessary files and programs, will prompt you to install others if needed
+funannotate setup -i all
+
+```
+
+```{bash test funannotate installation, eval=FALSE}
+
+mkdir -p ${WORKDIR}/funannotate
+cd ${WORKDIR}/funannotate
+mkdir -p test && cd test
+
+conda activate funannotate
+
+funannotate test -t all --cpus 2
+
+
+```
+
+## 10.2 generate transcriptome from IsoSeq data with PASA
+
+If you have short mRNA reads from same individual, can run funannotate train which is a wrapper for Trinity+PASA+TransDecoder pipeline that can incorporate short and long read data. We only had IsoSeq long reads, so we ran the PASA prediction step manually. Publicly available short read data was used later on to update gene predictions in funannotate update (see below section 10.4). 
+
+### 10.2.1 clean reads with Seqclean and UniVec
+
+UniVec is the NCBI databse of commonly used vector sequences that are known to contaminate sequencing data. We can use the tool [seqclean](https://sourceforge.net/projects/seqclean/) with the UniVec db tos crub our data of such contaminants. It is part of the standard PASA pipeline as an essential preprocessing step to clean your RNA data. You can get it via ftp [here](ftp://ftp.ncbi.nlm.nih.gov/pub/UniVec/).
+
+```{bash seqclean with univec, eval=FALSE}
+
+cd ${WORKDIR}/pasa
+
+seqclean Obeta_hq_transcripts_fixed.fasta
+#ouptut Obeta_hq_transcripts_fixed.fasta.clean
+
+```
+
+### 10.2.2 run Pasa pipeline with SQLite
+
+NOTE: PASA can be run either with MySQL or SQLite. Setting up MySQL both locally and on our HPC proved to be troublesome and excessively time consuming, so we opted to run PASA in SQLite mode. SQLite is single threaded only, so the process takes a long time unfortunately. 
+
+```{bash run PASA, eval=FALSE}
+
+cd ${WORKDIR}/pasa
+
+##The alignAssembly.config contains basic information. Most importantly it contains the name/location of our SQLite DB
+
+##note PASA is single threaded with SQLite (takes forever), so we set the CPU count to 1 to prevent errors
+
+#launch PASA after making the config files
+${PASAHOME}/Launch_PASA_pipeline.pl -c alignAssembly.config \
+-C \
+-r \
+-R \
+-g fOpsBet2.1_genomic.fa \
+-t Obeta_hq_transcripts_fixed.fasta.clean \
+-T \
+-u Obeta_hq_transcripts_fixed.fasta \
+--ALT_SPLICE \
+--ALIGNERS blat,minimap2 \
+--CPU 1 \
+1>pasa.err \
+2>pasa.out
+
+#NOTE: did not use gmap because it was always throwing errors
+
+
+```
+
+```{bash extract genome aligned reads to submit to TSA, eval = FALSE}
+
+##get genome aligned transcripts. filter anything less tahn 200 bases for TSA
+samtools view -bh -F 4 Obeta_hq_transcripts_fixed.fasta.clean.mm2.bam | \
+samtools bam2fq - | seqtk seq -A -L 200 - > fOpsBet2.1_transcriptome.fa
+
+##get contaminant transcripts for downstream meta-transcriptomics (someday)
+samtools view -bh -f 4 Obeta_hq_transcripts_fixed.fasta.clean.mm2.bam | \
+samtools bam2fq - | seqtk seq -A - > fOpsBet2.1_transcriptome_contaminants.fa
+
+```
+
+
+### 10.2.3 generate protein predictions with transdecoder
+```{bash run PASA transdecoder, eval=FALSE}
+
+cd ${WORKDIR}/pasa
+
+#Get protein assemblies via transdecoder
+$PASAHOME/scripts/pasa_asmbls_to_training_set.dbi \
+     --pasa_transcripts_fasta fOpsBet2.0_pasa_db.assemblies.fasta \
+     --pasa_transcripts_gff3 fOpsBet2.0_pasa_db.pasa_assemblies.gff3 \
+1>pasa_transdecoder.err \
+2>pasa_transdecoder.out
+
+#The outputs have a .transdecoder.* name.
+
+```
+
+## 10.3 predict gene models using funnanotate predict
+
+This step takes your soft masked genome and input from the Trinity-PASA-Transdecoder pipeline to run the following ab inito prediciton tools: Augustus, snap, glimmerHMM, CodingQuarry and GeneMark-ES/ET. The results of these predictors are then passed to EvidenceModeler to generate high quality concensus gene models. Optionally you can add gene evidence from external programs (e.g. MAKER) into this step if you have it. 
+
+```{bash funannotate predict, eval=FALSE}
+
+##Inputs
+## PASA transcript predictions in genome space after running transdecoder, e.g. .assemblies.fasta.transdecoder.genome.gff3
+## high quality transcripts from IsoSeq as transcript evidence, use the UniVec cleaned file with reformatted headers that we used as input to PASA
+## PASA also aligned HQ transcripts to genome, so we can provide that bam, .mm2.bam from PASA output
+## soft masked genome from RepeatModeler and RepeatMasker. This genome soft masks all repeats identified from custom library, which in our case was de novo + fishTEDB. Soft masking allows gene predictors to extend into repettive regions but prevents them from seeding genes within repetitive regions. 
+
+funannotate predict \
+-i "repeats/repclassifier/05_full_out/fOpsBet2.1_genomic.full_mask.soft.fa" \
+-o funannotate/predict \
+--SeqCenter "UC Davis DNA Technologies & Expression Analysis Core" \
+--species "Opsanus beta" \
+--isolate "Bic" \
+--name "P3L16" \
+--transcript_evidence "pasa/Obeta_hq_transcripts_fixed.fasta.clean" \
+--rna_bam "pasa/Obeta_hq_transcripts_fixed.fasta.clean.mm2.bam" \
+--pasa_gff "pasa/fOpsBet2.1_pasa_db.assemblies.fasta.transdecoder.genome.gff3" \
+--busco_seed_species "zebrafish" \
+--busco_db "actinopterygii" \
+--organism "other" \
+--repeats2evm \
+--keep_evm \
+--optimize_augustus \
+--cpus 10
+
+```
+
+## 10.4 refine gene model using funannotate update
+
+### 10.4.1 download Toadfish RNAseq data from NCBI
+
+```{bash get RNAseq data}
+
+mkdir ${WORKDIR}/raw_reads/RNAseq && cd ${WORKDIR}/raw_reads/RNAseq
+
+#We are retrieving NCBI fastqs for previous O. beta transcriptiome PRJNA313355
+runs="SRR3193035 SRR3193034 SRR3193033 SRR3192986"
+
+for run in runs
+do
+fasterq-dump $run
+gzip ${run}*
+done
+
+
+```
+
+### 10.4.2 fix fastq headers for Trinity
+
+```{bash fix headers}
+
+##SRA fastqs have a header format that gives trinity problems, fix the headers
+
+
+for FILE in *.fastq
+do
+echo $(date -u) "processing ${FILE}..."
+VAL=$(echo $FILE | awk -F"_" '{print $2}' | sed 's/.fastq//g') 
+awk -v fwdrev="$VAL" '{print (NR%4 == 1) ? "@" ++i "/" fwdrev : (NR%4==3) ? "+" :  $0}' $FILE > ${FILE%.fastq}_fix.fastq
+echo $(date -u) "${FILE} processed! continuging to next file..."
+done
+echo $(date -u) "all done!"
+
+
+```
+
+### 10.4.2 run funnanotate update
+
+```{bash funannotate update, eval=FALSE}
+
+##Inputs
+## raw sequencing reads from previous Obeta transcriptome project, headers
+## reformated to work with Trinity's internal trimmer
+## HQ transcripts from IsoSeq also used as long read evidence.
+
+funannotate update \
+-i ${WORKDIR}/funannotate/predict \
+-o ${WORKDIR}/funannotate/update \
+--cpus 15 \
+--pasa_db mysql \
+--pasa_config ${PASAHOME}/pasa_conf/conf.txt \
+--left SRR3192986_1_fix.fastq SRR3193033_1_fix.fastq SRR3193034_1_fix.fastq SRR3193035_1_fix.fastq \
+--right SRR3192986_2_fix.fastq SRR3193033_2_fix.fastq SRR3193034_2_fix.fastq SRR3193035_2_fix.fastq \
+--memory 100G \
+--pacbio_isoseq Obeta_hq_transcripts_fixed.fasta \
+--SeqCenter "UC Davis DNA Technologies & Expression Analysis Core" \
+--species "Opsanus beta" \
+--isolate "Bic" \
+--name "P3L16" 
+
+
+```
+
+## 10.5 annotate gene models using funannotate annotate
+
+This step takes your protein-coding models from the predict step and identify Pfam domains, CAZYmes, secreted proteins, proteases (MEROPS), and BUSCO groups. Additionally, funannotate can run InterProScan5 and egg-nog to further annotate if they are available. We opted to run these additional analyses for high quality annotation. Note that InterProScan5 must be run externally and the results provided. 
+
+### 10.5.1 run interpro scan
+```{bash run IPS, eval = FALSE }
+
+mkdir -p ${WORKDIR}ips
+
+IPS=/PATH/TO/my_interproscan/interproscan-5.52-86.0/
+PROTEOME=${WORKDIR}/funannotate/predict/update_results/Opsanus_beta_Bic.proteins.fa
+
+${IPS}/interproscan.sh -cpu 14 -i ${PROTEOME} -d ${WORKDIR}/ips
+
+```
+
+### 10.5.3 run funannotate annotate
+```{bash funannotate annotate, eval = FALSE}
+
+funannotate annotate \
+-i funannotate/predict \
+--cpus 10 \
+--busco_db actinopterygii \
+--iprscan /nethome/n.kron/coral_omics/fOpsBet2.1/ips/Opsanus_beta_Bic.proteins.fa.xml
+
+##make a reduced annotation results file (without sequence data) for easier manipulation
+awk -F"\t" '{for (i = 1; i <= 22; i++) {printf "%s\t", $i}; printf "\n"}' < Opsanus_beta_Bic.annotations.txt > Opsanus_beta_Bic.annotations_no_seq.txt
+
+
+```
+
+```{r visuzlize annotation results, message=FALSE, error=FALSE,warning=FALSE}
+
+
+fun_annots <- read.delim("annotations/Opsanus_beta_Bic.annotations_no_seq.txt", header = TRUE, sep = "\t")
+
+fun_annots %>% filter(Feature == "mRNA") %>% nrow() #38994
+fun_annots %>% filter(PFAM != "") %>% nrow() #24222
+#24222 / 38994 = 62.1%
+fun_annots %>% filter(InterPro != "") %>% nrow() #29438
+#29438/38994 = 75.5%
+fun_annots %>% filter(GO.Terms != "") %>% nrow() #21430
+#21430/38994 = 54.9%
+fun_annots %>% filter(COG != "") %>% nrow() #31703
+#31703/38994 = 81.3%
+fun_annots %>% filter(EggNog != "") %>% nrow() #32465
+#32465/38994 83.3%
+
+fun_annots %>% filter(EggNog != "" & COG != "" &
+                       GO.Terms != "" &  InterPro != "" &
+                       PFAM != "" ) %>% nrow() #18218
+
+fun_annots %>% filter(EggNog != "" | COG != "" |
+                       GO.Terms != "" |  InterPro != "" |
+                       PFAM != "" ) %>% nrow() #32772/38994
+
+# InterPro
+# EggNog
+# GO.Terms
+# COG
+# PFAM
+# EC_number
+
+```
+
+
+# 11. comparative analysis
+## 11.1 similarity to close relative
+### 11.1.2 genome to genome mapping
+```{bash nucmer alignment, eval = FALSE}
+
+##align fOpsbet2.1 to ThaAma1.1
+nucmer --version
+
+##primary assembly
+nucmer -l 100 -prefix Primary2ThaAma \
+${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa \
+${WORKDIR}/assemblies/GCF_902500255.1_fThaAma1.1_genomic.fa
+
+##primary dotplot with dotPlotly
+delta-filter -l 10000 -q -r Primary2ThaAma.delta > Primary2ThaAma.filt.delta
+show-coords -c rimary2ThaAma.filt.delta > Primary2ThaAma.filt.coords
+Rscript mummerCoordsDotPlotly.R -i Primary2ThaAma.filt.coords -o Primary2ThaAma -s -t -m 500 -q 10000 -l -x
+
+##final assembly
+nucmer -l 100 -prefix OpsBet2ThaAma \
+${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa \
+${WORKDIR}/assemblies/GCF_902500255.1_fThaAma1.1_genomic.fa
+
+show-coords -c OpsBet2ThaAma.delta > OpsBet2ThaAma.coords
+Rscript mummerCoordsDotPlotly.R -i OpsBet2ThaAma.coords -o OpsBet2ThaAma -s -t -m 500 -q 10000 -l -x
+
+
+
+
+```
+
+### 11.1.3 mapping for circos figure
+```{bash, eval = FALSE}
+### alignment of masked genomes
+
+# convert ThaAma1.1 soft maksed to hard masked genome
+sed -e '/^>/! s/[[:lower:]]/N/g' ${WORKDIR}/repeats/FishTEDB/ThaAma/fThaAma1.1_genomic.fa.masked > ${WORKDIR}/repeats/FishTEDB/ThaAma/fThaAma1.1_genomic.fa.masked.hard
+
+# align hard masked genomes
+nucmer -l 500 -prefix OpsBet2ThaAma \
+${WORKDIR}/repeats/repclassifier/05_full_out/fOpsBet2.1_genomic.simple.soft_mask.complex.hard.fa \
+${WORKDIR}/repeats/FishTEDB/ThaAma/fThaAma1.1_genomic.fa.masked.hard
+
+# prepare for dot using the .py script provided
+python ~/local/dot/DotPrep.py --delta OpsBet2ThaAma.delta
+
+##convert unfiltered deltas for use with Dot
+
+## now filter mummer deltas
+delta-filter -1 OpsBet2ThaAma.delta > OpsBet2ThaAma.filt.delta
+
+```
+
+
+```{bash extract circos data}
+
+## extract mappings to produce arcs in circos
+show-coords -TH OpsBet2ThaAma.filt.delta | sort -k5,5nr | awk '{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4"\tz="z}' > OpsBet2ThaAma_links.tsv
+
+
+show-coords -rcl OpsBet2ThaAma.filt.delta > matches.txt
+awk '{print $18, $1, $2, $19, $4, $5}' matches.txt > links.txt
+
+bundlelinks -strict -max_gap 5e6 -min_bundle_size 1e4 -link links.txt > links.bundle.txt
+
+##generate circos karyoptes from fOpsBet2.1 and fThaAma, using only chromosomes
+
+genomtools -s s fThaAma1.1_genomic.fa > fThaAma1.1_genomic_scaf_size.txt
+
+
+##we step the hue by 15 degrees because 360 degress / 23 chroms = 15.5
+head -n23 ../../Stats/funannotate_scaffold_size.txt | awk '{hue=sprintf("%03d", h); print "chr - "$1" fOpsBet2.1_"NR" 0 "$2" hue"hue; h+=15;}' > fOpsBet2.1_genomic.chr
+head -n23 fThaAma1.1_genomic_scaf_size.txt | awk '{print "chr - "$1" fThaAma1.1_"NR" 0 "$2" white"}'  > fThaAma1.1_genomic.chr 
+
+awk 'BEGIN {print "luminance = 70\nchroma= 100\n\n<colors>"};hue=sprintf("%03d", h){print $3"=lch(conf(luminance),conf(chroma),"hue")"; h+=15;}"}' fOpsBet2.1_genomic.chr >> circos.conf
+
+awk '{print $3" = white"}; END {print "</colors>"}' fThaAma1.1_genomic.chr fThaAma1.1_genomic.chr >> circos.conf
+
+##combine the two
+cat fOpsBet2.1_genomic.chr > chr.kar
+##add the other one in reverse order. Use tac if on Linux, tail -r is OSX
+tail -r fThaAma1.1_genomic.chr >> chr.kar
+
+#use circos tools bundlelinks to shrink the number of links
+
+
+```
+
+
+```{r colorize links in R, echo = FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+library(tidyverse)
+hue_map <- read.delim("circos/synteny_plot/fOpsBet2.1_genomic.chr", header = FALSE, sep = " ")[,c(3,7)]
+colnames(hue_map) <- c("scaffold", "hue")
+links <- read.table("circos/synteny_plot/OpsBet2ThaAma_links_bundle.tsv")
+links <- links %>% inner_join(hue_map, by = c("V1" = "scaffold") ) %>% mutate( V8 = paste0(V7,",color=",hue)) %>% select(-hue, -V7)
+write_delim(links,"circos/synteny_plot/OpsBet2ThaAma_links_bundle_hues.tsv", delim = " ", col_names = FALSE)
+
+
+```
+
+
+```{bash bundle links with circos, eval = FALSE}
+
+grep -v "NW" OpsBet2ThaAma_links_bundle_hues.tsv > OpsBet2ThaAma_links_bundle_hues_filt.tsv
+orderchr -links OpsBet2ThaAma_links_bundle_hues_filt.tsv -karyotype chr.kar
+
+```
+
+
+## 11.2 Ortholog identification
+
+### 11.2.1 run OrthoFinder
+```{Orthofinder run bash, eval = FALSE}
+
+## Download protein files for the following species from RefSeq FTP
+### Human GRCH38.p14
+### Mouse GRCm39
+### Zebra fish GRCz11
+### Spotted Gar LepOcu1
+### Japanese medaka ASM223467v1
+### Xenopus Xenopus_laevis_v10.1
+### Takifugu fTakRub1.2
+### Amazon toadfish fThaAma1.1
+### Salmon Ssal_v3.1 
+### Xiphophorus maculatus X_maculatus-5.0-male
+
+
+### get primary transcripts
+for f in *.faa; do python /nethome/n.kron/mambaforge/envs/orthofinder/bin/primary_transcript.py $f; done
+
+tree refs
+
+#refs/
+# ├── fOpsBet2.0_protein_mod.faa
+# ├── GCF_000001405.40_GRCh38.p14_protein.faa
+# ├── GCF_000001635.27_GRCm39_protein.faa
+# ├── GCF_000002035.6_GRCz11_protein.faa
+# ├── GCF_000242695.1_LepOcu1_protein.faa
+# ├── GCF_002234675.1_ASM223467v1_protein.faa
+# ├── GCF_017654675.1_Xenopus_laevis_v10.1_protein.faa
+# ├── GCF_901000725.2_fTakRub1.2_protein.faa
+# ├── GCF_902500255.1_fThaAma1.1_protein.faa
+# ├── GCF_905237065.1_Ssal_v3.1_protein.faa 
+# ├── GCF_002775205.1_X_maculatus-5.0-male_protein.faa
+
+orthofinder -f refs/primary_transcripts
+
+
+```
+
+### 11.2.2 investigate OrthoGroups
+```{r OrthoGroup upset plots, message=FALSE, error=FALSE, warning=FALSE, fig.width = 4.5}
+
+
+OrthoCounts <- read.delim("OrthoFinder/Orthogroups/Orthogroups.GeneCount.tsv") 
+
+mat <- OrthoCounts %>% column_to_rownames("Orthogroup") %>%
+  select(-Total)
+
+mat[mat > 0] <- 1
+
+mat[,c(
+    "Homo_sapiens",
+    "Mus_musculus",
+    "Xenopus_laevis",
+    "Lepisosteus_oculatus",
+    "Danio_rerio",
+    "Salmo_salar",
+    "Xiphophorus_maculatus",
+    "Takifugu_rubripes",
+    "Oryzias_latipes",
+    "Thalassophryne_amazonica",
+    "Opsanus_beta")]
+
+library(UpSetR)
+pdf(width = 7, height = 5, file = "figures/OrthoFinder_upset.pdf")
+upset(mat, nsets = 11, order.by = "freq", keep.order = TRUE,set_size.numbers_size = TRUE, number.angles = 90,sets = c(
+    "Homo_sapiens",
+    "Mus_musculus",
+    "Xenopus_laevis",
+    "Lepisosteus_oculatus",
+    "Danio_rerio",
+    "Salmo_salar",
+    "Xiphophorus_maculatus",
+    "Takifugu_rubripes",
+    "Oryzias_latipes",
+    "Thalassophryne_amazonica",
+    "Opsanus_beta"))
+dev.off()
+
+```
+
+### 11.2.3 find genes of interest
+
+```{r, message=FALSE, error=FALSE, warning=FALSE}
+
+OrthoGroups <- read.delim("OrthoFinder/Orthogroups/Orthogroups.tsv") 
+
+OrthoGoI <- OrthoGroups %>%
+  select(Orthogroup, Danio_rerio, Homo_sapiens, Mus_musculus) %>%
+  pivot_longer(cols = c(Danio_rerio, Homo_sapiens, Mus_musculus), names_to = "organism", values_to = "prots") %>%
+  separate_rows(prots, sep = ",") %>% unique() %>% mutate(prots = str_remove(prots, "[.][0-9]$"))
+GoI <- read.delim("annotations/Daniel_gene_families.txt") %>%
+  pivot_longer(cols = c(Danio_rerio, Homo_sapiens, Mus_musculus), names_to = "organism", values_to = "prots") %>%
+  separate_rows(prots, sep = ",")%>% unique()%>% mutate(prots = str_remove(prots, "[.][0-9]$"))
+
+##orthogroups of intereset
+OoI <- inner_join(GoI, OrthoGoI)%>% unique() %>% filter(prots != "") %>% select(Orthogroup,Category, Gene, alt_name) %>% unique()
+
+inner_join(OoI, OrthoGroups) %>% view()
+
+```
+
+
+## 11.3 gene family evolution
+
+### 11.3.1 find changing gene families with CAFE5
+```{cafe5 gene families bash, eval = FALSE}
+
+### get families and species trees from Orthofinder
+### build the lambda tree by replacing tree distances with
+### 1 and 2, 1 for tetrapod and gar, 2 for post duplication teleosts
+
+##convert orthofinder tree into ultrametric tree for cafe5
+python make_ultrametric.py SpeciesTree_rooted.txt
+
+##run cafe5 an estimate genome assembly/annotation error
+cafe5 -i Orthogroups.GeneCount.tsv -t SpeciesTree_rooted_ultrametric.tre -y SpeciesTree_lambdas.txt -e 
+
+cp results/Base_error_model.txt ./error_model.txt
+
+##run cafe5 again with error model
+cafe5 -i Orthogroups.GeneCount.tsv -t SpeciesTree_rooted_ultrametric.tre -y SpeciesTree_lambdas.txt -eerror_model.txt
+
+
+```
+
+```{r get significantly changing OG for Obeta}
+
+cafe_res <- read.delim("cafe5/Base_asr.tre", skip = 2, header = FALSE, sep = " ") %>%
+  dplyr::select(V4, V6) %>% column_to_rownames("V4") %>%
+  filter(., ! V6 == "")
+
+
+
+sig_OGs_long <- lapply(
+  rownames(cafe_res),
+  FUN = function(x) {
+    text = cafe_res[x,]
+    df <- ggtree::read.tree(text = text) %>% 
+      as_tibble() %>% 
+      as.data.frame() %>%
+      rowwise() %>%
+      mutate(
+        num_genes = str_split(label, "_")[[1]] %>% last(),
+        sig = ifelse(str_detect(label, "[*]"), TRUE, FALSE),
+        Organism = str_remove(label, "<[0-9]*>[*]*_[0-9]*"),
+        OrthoGroup = x
+      ) %>% dplyr::select(OrthoGroup, node, Organism, sig) %>%
+      dplyr::filter(Organism != "")
+    df
+  }
+) %>%
+  do.call("rbind", .)
+
+save(sig_OGs_long, file = "cafe5/sig_OGs_long.R")
+load("cafe5/sig_OGs_long.R")
+
+sig_OGs_wide <- sig_OGs_long %>%
+  pivot_wider(., id_cols = OrthoGroup, names_from = "Organism", values_from = "sig")
+
+read.delim("cafe5/Base_change.tab")[]
+
+#significantly changing families only in Obeta
+sig_Obeta <- (sig_OGs_wide %>% filter(Opsanus_beta == TRUE))$OrthoGroup
+    
+Obeta_expansions <- read.delim("cafe5/Base_change.tab")%>% filter(FamilyID %in% sig_Obeta_all) %>% select(FamilyID, Opsanus_beta.7.) %>%
+  mutate(direction = ifelse(Opsanus_beta.7. < 0, "contracted","expanded") ) 
+
+Obeta_expansions %>%
+  ggplot(., aes(x = FamilyID, y = Opsanus_beta.7., fill = direction)) +
+  geom_bar(stat = "identity") +
+  coord_flip()
+
+Obeta_expansions %>% filter(direction == "contracted")
+    
+```
+
+```{r ko from obeta level}
+
+ko <- read.delim("annotations/ghostKOALA/fOpsBet2.1_ko.txt", header = FALSE, sep = "\t", col.names = c("prot","ko"))
+
+orthogroups <- read.delim("OrthoFinder/Orthogroups/Orthogroups.tsv") %>%
+  dplyr::select(Orthogroup, Opsanus_beta) %>%
+  separate_rows(., Opsanus_beta, sep = ",")
+
+orthoko <- inner_join(orthogroups, Obeta_expansions, by = c("Orthogroup"="FamilyID")) %>%
+  full_join(.,
+           ko %>% mutate(Opsanus_beta = str_remove(prot, "-T[0-9]*")) %>%
+             filter(ko != "") ) 
+
+orthoko %>% select(Orthogroup, ko, direction,Opsanus_beta.7.) %>% filter(ko != "" & Orthogroup != "" & direction != "") %>% unique() %>% arrange(desc(direction),desc(Opsanus_beta.7.)) %>% filter(direction == "expanded")
+
+
+
+library(clusterProfiler)
+
+contracted_ko_res <- enrichKEGG(gene = (orthoko %>% select(Orthogroup, ko, direction,Opsanus_beta.7.) %>% filter(ko != "" & Orthogroup != "" & direction != "") %>% unique() %>% arrange(desc(direction),desc(Opsanus_beta.7.)) %>% filter(direction == "contracted"))$ko,
+           organism = "ko"
+           )
+
+expanded_ko_res <- enrichKEGG(gene = (orthoko %>% select(Orthogroup, ko, direction,Opsanus_beta.7.) %>% filter(ko != "" & Orthogroup != "" & direction != "") %>% unique() %>% arrange(desc(direction),desc(Opsanus_beta.7.)) %>% filter(direction == "expanded"))$ko,
+           organism = "ko"
+           ) 
+
+clusterProfiler::heatplot(contracted_ko_res)
+
+clusterProfiler::heatplot(expanded_ko_res)
+
+
+clusterProfiler::dotplot(contracted_ko_res)
+
+clusterProfiler::dotplot(expanded_ko_res)
+
+
+contracted_ko_res%>% as.data.frame()
+
+expanded_ko_res%>% as.data.frame()
+
+orthogroups %>% filter(Orthogroup == "OG0000001")
+
+read.delim("OrthoFinder/Orthogroups/Orthogroups.tsv") %>% filter(Orthogroup == "OG0013890")
+
+inner_join(orthogroups, Obeta_expansions, by = c("Orthogroup"="FamilyID")) %>% arrange(desc(direction), desc(Opsanus_beta.7.)) %>% select(-Opsanus_beta) %>% unique()
+
+# OG0000010	-4	contracted -- histone H2B
+# OG0000036	-4	contracted -- neurocalcin delta
+# OG0000108	-4	contracted -- voltage gated sodium channel	
+# OG0000124	-4	contracted -- guanine nucleotide-binding protein subunit alpha
+# OG0000273	-4	contracted -- copine 5
+# OG0000007	-5	contracted -- myosin heavy chain	
+# OG0000008	-7	contracted -- zinc finger protein OZF (human)
+# OG0000033	-7	contracted -- trace amine-associated receptor (oderant receptors, Danio, human) 
+# OG0000045	-7	contracted -- protocadherin alpha (danio, human)	
+# OG0000026	-9	contracted -- protocadherin gamma (danio, human)		
+# OG0000001	-10	contracted -- olfactory receptor C family (from Danio)
+# OG0000009	-12	contracted -- odorant receptor (from Danio)
+# OG0000023	-12	contracted -- odorant receptor (from Danio, mouse)
+# 
+# 
+# OG0000005	49	expanded -- tripartite motif containing 35
+# OG0000161	46	expanded -- putative V-set and immunoglobulin domain-containing-like protein (ighv)		
+# OG0000002	37	expanded -- bloodthirsty-related gene family / pyrin
+# OG0000670	24	expanded -- V-set pre-B cell surrogate light chain 1
+# OG0000216	21	expanded -- collagen alpha
+# OG0001435	21	expanded -- immunoglobulin lambda-like	
+# OG0000053	20	expanded -- major histocompatibility complex class I UBA	(K06751 MHC1)
+# OG0000623	16	expanded -- mitochondrial enolase superfamily
+# OG0000443	15	expanded -- E3 ubiquitin-protein ligase NEURL3
+# OG0007156	14	expanded -- vascular endothelial growth factor receptor 2-like (only shared with xenopus?)
+# OG0000760	13	expanded -- retina-specific copper amine oxidase	
+# OG0001572	13	expanded -- coiled-coil domain-containing protein 15 (K16752 MHC2?)
+# OG0000979	12	expanded -- E3 ubiquitin-protein ligase RBBP6
+# OG0002063	11	expanded -- uncharacterized fish family
+# OG0003290	11	expanded -- unknown, lost in most fish but present in xeno
+# OG0000076	10	expanded -- URGCP upregulator of cell proliferation	
+# OG0001507	10	expanded -- adenylate kinase 7
+# 
+# OG0003081 8  expanded -- TAP binding protein (tapasin), tandem duplicate 2 (K08058)
+# OG0012490 5  expanded -- uncharacterized, T-cell receptor beta chain V (K10785)
+# OG0005726 5  expanded -- leukocyte cell-derived chemotaxin-2 (K25755)
+# OG0001880 1 expanded -- nuclear factor of activated T-cells cytoplasmic 2(K17332)
+
+
+##Muscle
+#OG0013890	6	expanded	-- titan K12567
+#OG0000007	-5	contracted -- myosin heavy chain 2
+
+
+```
+
+
+```{r render trees, message=FALSE, echo=FALSE, warning=FALSE, fig.width=5}
+
+library(ggtree)
+library(stringr)
+
+tree <- ggtree::read.tree(file = "cafe5//Base_clade.tre")
+
+annot <- read.delim("cafe5/Base_clade_results.txt") %>%
+  rowwise() %>%
+  mutate(node = str_extract(X.Taxon_ID, "<[0-9]*>") %>% str_remove_all(., "[><]")%>% as.numeric(),
+         change = paste0("+",Increase,"/-",Decrease)) 
+
+
+tree <- as_tibble(tree) %>% full_join(annot)  %>% treeio::as.treedata(.) 
+  ggtree(tree) +
+  xlim(NA, 0.6) + 
+  geom_tiplab() +
+  geom_nodelab(aes(label = change), nudge_x = -0.03, nudge_y = 0.2) +
+  geom_tiplab(aes(label = change), nudge_y = -0.35) +
+  geom_cladelab(node=19, label="Batrachoidiformes", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.13,
+                extend = 0.2) +
+    geom_cladelab(node=18, label="Percomorpha", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.15,
+                extend = 0.2) +
+    geom_cladelab(node=17, label="Euteleostei", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.17,
+                extend = 0.2) +
+    geom_cladelab(node=16, label="Teloestei", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.19,
+                extend = 0.2) +
+    geom_cladelab(node=15, label="Actinopterygii", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.21,
+                extend = 0.2) +
+    geom_cladelab(node=13, label="Sarcopterygii", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.21,
+                extend = 0.2) +
+    geom_cladelab(node=14, label="Mammalia", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.17,
+                extend = 0.2)+
+  geom_cladelab(node=13, label="Tetropoda", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.19,
+                extend = 0.2) +
+    geom_cladelab(node=21, label="Atherinomorpha", align=TRUE,
+                angle = 90, hjust = 0.5, vjust = 1, offset = 0.13,
+                extend = 0.2) +
+  theme_tree2()
+  ggsave(filename = "figures/cafe5_tree.pdf")
+  # calde 
+  # percomorpha
+  # 
+  # superorder
+  # Atherinomorpha - medaka and xiphophorus
+  # order
+  # Beloniformes - medaka
+  # Cyprinodontiformes - xiphophorus
+  # Cypriniformes - danio
+  # Salmoniformes - salmo
+  # Tetraodontiformes - takifugu
+  # Lepisosteiformes - gar
+  # Rodentia - mouse
+  # Primates - human
+  # Anura - xenopus
+  
+##figure needs to be tweaked in illustrator for publication
+
+```
+
+
+# 12. Visualization
+## 12.1 Genome Circos summary plot
+### 12.1.1 set up circos direcotry
+```{bash set up directory for circos plot, eval = FALSE}
+
+mkdir -p ${WORKDIR}/visualization/circos/genome_plot
+cd ${WORKDIR}/visualization/circos/genome_plot
+
+#copy over out scaffold size data generated by genometools in #8.2
+cp ${WORKDIR}/assemblies/funannotate_scaffold_size.txt .
+
+#copy dispersed repeat landscape
+cp ${WORKDIR}/repeats/repclassifier/05_full_out/fOpsBet2.1_genomic.complex_mask.gff3 .
+
+#copy satelite DNA landscape
+cp ${WORKDIR}/repeats/TRASH/TRASH_fOpsBet2.1_genomic.fa.gff3 .
+
+#copy gene prediction data
+cp ${WORKDIR}/funannotate/
+
+## make karyotype from our genome size data
+cat funannotate_scaffold_size.txt | awk '{hue=sprintf("%03d", h); print "chr - "$1" fOpsBet2.1_"NR" 0 "$2}' > fOpsBet2.1_genomic.chr
+
+```
+
+### 12.1.2 generate BEDgraphs for figure tracks
+```{bash generate feature windows, eval = FALSE}
+# Install deepStats and bedOps into an env if you haven't already
+# mamba create -n deepStats -c bioconda -c conda-forge  deepstats
+# conda activate deepStats
+# mamba install -c bioconda -c conda-forge bedops
+
+#we want ~1000 windows for optimal graphing in circos. we have 2.1 Gb genome
+# 2100000000 / 1000 = 2100000 ~ 2MB window
+
+#convert gff3 to bed
+gff2bed < fOpsBet2.1_genomic.complex_mask.gff3 > fOpsBet2.1_genomic.complex_mask.gff3.bed
+gff2bed < TRASH_fOpsBet2.1_genomic.fa.gff3 > TRASH_fOpsBet2.1_genomic.fa.gff3.bed
+
+#split beds into positive and negative 
+for FILE in *.bed
+do
+awk '$6 == "+" {print $0}' $FILE > ${FILE}.positive
+awk '$6 == "-" {print $0}' $FILE > ${FILE}.negative
+done
+
+#convert bed to bedgraph
+## for total
+for FILE in *.bed
+do
+dsComputeBEDDensity -i $FILE -o $FILE -w 2000000 -c funannotate_scaffold_size.txt
+done
+
+## split based on positive and negative strands
+for FILE in *{positive,negative}
+do
+dsComputeBEDDensity -i $FILE -o $FILE -w 2000000 -c funannotate_scaffold_size.txt
+done
+
+## generate gc coverage window for genome
+### used GC_window.pl from https://github.com/DamienFr/GC_content_in_sliding_window
+### must modify #! to /usr/bin/env perl to work on cluster
+GC_content.pl --fasta ${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa --window 2000000 --step 1000000
+
+dsComputeGCCoverage -i ${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa -o fOpsBet2.1_genomic.GC -w 2000000
+
+## generate coverage plot 
+
+samtools faidx ${GENOME}_genomic.fa
+
+bedtools makewindows -g ${GENOME}_genomic.fa -w 2000000 -s 1000000 > genome.windows
+
+### use minimap2 alignment bam of HiFi reads
+bedtools multicov -bams hifi2final.sort.bam -bed genome.windows > genome.cov.histogram
+
+##GC content and N content with bedtools
+
+bedtools nuc -fi fOpsBet2.1_genomic.fa -bed genome.windows > fOpsBet2.1_genomic.fa.nuc.stats
+awk -F"\t" '{print $1"\t"$2"\t"$3"\t"$4}' fOpsBet2.1_genomic.fa.nuc.stats > fOpsBet2.1_genomic.GC.bedgraph
+
+bedtools nuc -fi 05_full_out/${GENOME}_genomic.simple_mask.soft.complex_mask.hard.fa -bed genome.windows > fOpsBet2.1_genomic.fa.mask.hard.nuc.stats
+awk -F"\t" '{print $1"\t"$2"\t"$3"\t"$(10)}' fOpsBet2.1_genomic.fa.nuc.stats > fOpsBet2.1_genomic.TE.bedgraph
+
+awk '{print $1,($4/$2000000)}' fOpsBet2.1_genomic.TE.bedgraph
+
+## gene density
+
+awk '$3 == "gene" {print $1"\t"$4"\t"$5}' ../../../funannotate/predict_old/annotate_results/Opsanus_beta_Bic.gff3 > Opsanus_beta_Bic_genes.bed
+
+dsComputeBEDDensity -i $Opsanus_beta_Bic_genes.bed -o $Opsanus_beta_Bic_genes.bed -w 2000000 -c funannotate_scaffold_size.txt
+
+dsComputeGCCoverage -i ${WORKDIR}/assemblies/fOpsBet2.1_genomic.fa -o fOpsBet2.1_genomic.GC -w 2000000
+
+bedtools map -a genome.windows -b ${WORKDIR}/funannotate/annotate_results/Opsanus_beta_Bic.gff3 -c 9 -o count_distinct > gene_density.bed
+
+
+```
+
+```{r gene density bedgraph, warning = FALSE, message = false, error = FALSE}
+
+## perhaps the ugliest way to do this, but it was quick to write. Better off done in Python with a loop. 
+
+#get gene data from gff3 and add windows fo size 2000000
+genes_bed <- read.delim("funannotate/annotate_results/Opsanus_beta_Bic.gff3", 
+           sep = "\t",
+           quote = "#",
+           skip = 1, header = FALSE) %>%
+  filter(V3 == "gene") %>%
+  select(V1,V4,V5, V9) %>%
+  rename(chr = "V1", start = "V4", end = "V5", gene = "V9") %>%
+mutate(
+  window_start = floor(start/2000000)*2000000,
+                     window_end = window_start +2000000,
+  window = paste0(window_start,"-", window_end)
+                     )
+
+##find genes that span a gap
+good <- genes_bed %>% filter(end < window_end)
+bad <- genes_bed %>% filter(end > window_end)
+
+##truncate genes that span gap
+##clip the gene at window end
+end_trnc <- bad %>%
+  mutate( end = window_end
+  )
+##reconsistute the clipped end and insert it into the next window
+start_trnc <- bad %>%
+  mutate( start = window_end,
+          window_start = window_end,
+          window_end = window_end + 2000000,
+          window = paste0(window_start,"-", window_end)
+  )
+
+#build corrected set
+corrected <- rbind(good, start_trnc, end_trnc) %>%
+  mutate(bases = end - start)
+
+corrected <- corrected %>% group_by(chr, window, window_start, window_end) %>%
+  summarise(bases = sum(bases)) %>%
+  mutate(prop = bases/2000000) 
+
+corrected%>% filter(prop >1) %>% select(chr, window, prop)
+
+# scaffold_12	2.4e+07-2.6e+07	1.066928	
+# scaffold_13	2.8e+07-3e+07	1.053695	
+# scaffold_19	6e+06-8e+06	4.199006	
+# scaffold_19	8e+06-1e+07	2.126006	
+# scaffold_21	2e+06-4e+06	1.287078	
+# scaffold_8	8.6e+07-8.8e+07	1.082868	
+
+corrected %>% ungroup() %>%
+  summarise(sum = sum(bases))
+
+
+
+
+genes_bed %>% filter(	window == "2.4e+07-2.6e+07", chr == "scaffold_12") %>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment() +
+  geom_point()+
+  labs(title = "scaffold 12")
+
+genes_bed %>% filter(	window == "2.8e+07-3e+07", chr == "scaffold_13") %>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment()+
+  geom_point()+
+  labs(title = "scaffold 13")
+
+genes_bed %>% filter(	window == "6e+06-8e+06", chr == "scaffold_19") %>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment() +
+  geom_point()+
+  labs(title = "scaffold 19")
+c("P3L16_041872", "P3L16_034973", "P3L16_034969", "P3L16_041874", "P3L16_041875")
+
+genes_bed %>% filter(	window == "8e+06-1e+07", chr == "scaffold_19")%>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment() +
+  geom_point()+
+  labs(title = "scaffold 19")
+
+genes_bed %>% filter(	window == "2e+06-4e+06", chr == "scaffold_21") %>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment() + geom_point()+
+  labs(title = "scaffold 21")
+
+genes_bed %>% filter(	window == "8.6e+07-8.8e+07", chr == "scaffold_8") %>%
+  ggplot(data =., aes(x = start, xend = end, y = gene, yend = gene)) +
+  geom_segment()+
+  geom_point()+
+  labs(title = "scaffold 8")
+
+##overlap rects
+genes_bed %>% filter(chr == "scaffold_19") %>%
+  ggplot(data =., aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf)) +
+  geom_segment(aes(x = start, xend = end, y = reorder(gene,start), yend = reorder(gene,start)))+
+  geom_rect(alpha = 0.25, fill = "red")+
+  labs(title = "scaffold 8") +
+  theme_classic()
+
+##scaffold 19 nightmare genes
+genes_bed %>% filter(chr == "scaffold_19") %>%
+  ggplot(data =., aes(x = start, xend = end, y = reorder(gene,start), yend = reorder(gene,start))) +
+  geom_segment() +
+  geom_rect(inherit.aes = FALSE, data = genes_bed %>% filter(	window %in% c( "6e+06-8e+06","8e+06-1e+07"), chr == "scaffold_19") %>% select(window_start, window_end) %>% distinct,  aes(xmin = window_start, xmax=window_end, ymin = -Inf, ymax = Inf ), fill = "red", alpha = 0.75) + labs(title = "scaffold 19")
+
+##scaffold 12 nightmare genes
+genes_bed %>% filter(chr == "scaffold_21") %>%
+  ggplot(data =., aes(x = start, xend = end, y = reorder(gene,start), yend = reorder(gene,start))) +
+  geom_segment() +
+  geom_rect(inherit.aes = FALSE, data = genes_bed %>% filter(	window %in% c( "2e+06-4e+06"), chr == "scaffold_12") %>% select(window_start, window_end) %>% distinct,  aes(xmin = window_start, xmax=window_end, ymin = -Inf, ymax = Inf ), fill = "red", alpha = 0.75) + labs(title = "scaffold 21")
+  
+
+```
+
+```{r circos contigs file, warning = FALSE, message = false, error = FALSE}
+
+agp <- read.delim("funannotate/annotate_results/Opsanus_beta_Bic.agp", sep = "\t",
+                  header = FALSE)
+contigs <- agp %>% filter(V5 == "W") %>% select(V1,V2,V3) %>%
+  arrange(V1,V2) %>%
+  mutate(id = row_number(),
+         color_int = id %% 2,
+         color = ifelse(color_int == 1, "fill_color=white","fill_color=grey")) %>%
+  select(V1,V2,V3,color)
+gaps <- agp %>% filter(V5 == "N") %>%
+  mutate(color = "color=black")  %>%
+  select(V1,V2,V3,color)
+
+write_delim(contigs, "circos/genome_plot/contigs.txt", delim = " ", col_names = FALSE, quote = "none")
+
+write_delim(gaps, "circos/genome_plot/gaps", delim = " ", col_names = FALSE, quote = "none")
+
+```
+
+```{r set up python for RMarkdown}
+
+library(tidyverse)
+library(reticulate)
+
+use_condaenv(conda = "/Users/nicholaskron/mambaforge/condabin/conda","biopython")
+
+py_run_string("import os as os")
+py_run_string("os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = 'C:/Users/2015524/Anaconda3/envs/py3.8/Library/plugins/platforms'")
+
+reticulate::conda_list()
+
+```
+
+```{python generate bedgraphs for features of interest from gff3}
+
+##decided to do this in Python because it was easier to manipulate. I'm sure tidyverse has an equivalent, but it was clearer to my in python. Any future updated program that handles features spanning windows and proper overlap edge cases will definitely be in python as well. 
+
+import pandas as pd
+import math
+
+## read in gff file
+
+#gff = pd.read_table("funannotate/annotate_results/Opsanus_beta_Bic.gff3", names = ["seqid","source","type","start","end","score","strand","phase","attributes"], sep = "\t", header = None, skiprows = 1)
+
+gff = pd.read_table("repeats/fOpsBet2.1_genomic.complex_mask.gff3", names = ["seqid","source","type","start","end","score","strand","phase","attributes"], sep = "\t", header = None, skiprows = 1)
+
+
+##set your feature and window size
+feature="dispersed_repeat"
+window_size=2000000 
+
+##isolate star, end, and chrom as specified by bedgraph format. sort accoring to start and chromosome
+df = gff[gff["type"]==feature][["seqid","start","end"]].sort_values(by=["seqid","start"])
+
+##merge entries if they overlap sequentially.
+##note this is not the ideal behavior. Even with sorting you may get some weird behavior, but this is good enough to get the results we need.
+df["group"]=(df["start"]>df["end"].shift()).cumsum()
+
+##aggregate overlapping entries into a single span
+result=df.groupby(["seqid","group"]).agg({"start":"min", "end": "max"})
+
+##set the window the span belongs to
+result["window_start"]=result["start"].apply(lambda x: math.floor(x/window_size)*window_size + 1)
+
+##set the window end coordiante
+result["window_end"]=result["window_start"]+window_size-1
+
+##calculate number of bases in the feature
+result["feature_bases"] = result["end"]-result["start"]
+
+##add up the bases covered by features within a span
+##NOTE: this is also not ideal behavior as features may span a window boundary. In practice, very few did and the break over the span was negligible to the calculation at this scale. A more robust algorithm to break spans over window boundaries is needed for absolute accuracy, but that's future work to play with.
+bedgraph = result.groupby(["seqid","window_start","window_end"]).sum("feature_bases")[["feature_bases"]]
+
+##get the proportion
+bedgraph["prop"]=bedgraph["feature_bases"]/window_size
+
+##remove unnecessary columns
+bedgraph.drop("feature_bases",axis =1, inplace = True)
+
+##write out to file
+
+#bedgraph.to_csv(path_or_buf = "circos/genome_plot/fOpsBet2.1_gene_density.bedgraph",sep = "\t", header = False, index = True)
+bedgraph.to_csv(path_or_buf = "circos/genome_plot/fOpsBet2.1_TE_density.bedgraph",sep = "\t", header = False, index = True)
+
+bedgraph.groupby("seqid").sum()
+
+```
+
+
+###12.2 mitogenome comparison visualizations
+
+```{bash align mitogenome to others for comparison, eval =FALSE}
+
+mkdir -p ${WORKDIR}/Mitogenome
+cd ${WORKDIR}/Mitogenome
+
+#download mitogenomes and genebank format annotations for P. myriaster, B. trispanosus, D. rerio and L. oculatus and copy over final Obeta mitogenome
+
+#AP006738.1 Batrachomoeus trispinosus mitochondrial DNA, complete genome except for D-loop
+#NC_004744.1 Lepisosteus oculatus mitochondrion, complete genome
+#AP006739.1 Porichthys myriaster mitochondrial DNA, complete genome
+
+#manually add gene /product feature lines for tRNA and rRNA to .gb files for mitohifi
+
+#rotate to start at tRNA-Phe using mitohifi
+
+SPECIES=`ls *.fasta | sed 's/.fasta//g'`
+
+for SPEC in $SPECIES
+rotation.py --gb ${SPEC}.gb --ref-gb ${SPEC}.gb --mito ${SPEC}.fasta 
+python ~/Programs/MitoHiFi/src/rotate_genbank.py ${SPEC}.gb "tRNA-Phe" ${SPEC}.mitogenome.rotated.gb
+done
+
+##run blasts for mito-synteny figue
+blastn -subject Btrispanosus.mitogenome.rotated.fa -query Pmyriaster.mitogenome.rotated.fa -num_threads 5 -out Btrispanosus2Pmyriaster.res -outfmt 6 -word_size 7 -evalue 1e-6
+
+blastn -subject Pmyriaster.mitogenome.rotated.fa -query Obeta.mitogenome.rotated.fa -num_threads 5 -out Pmyriaster2Obeta.res -outfmt 6 -word_size 7 -evalue 1e-6
+
+blastn -subject Obeta.mitogenome.rotated.fa -query Loculatus.mitogenome.rotated.fa -num_threads 5 -out Obeta2Loculatus.res -outfmt 6 -word_size 7 -evalue 1e-6
+
+blastn -subject Loculatus.mitogenome.rotated.fa -query Drerio.mitogenome.rotated.fa -num_threads 5 -out Loculatus2Drerio.res -outfmt 6 -word_size 7 -evalue 1e-6
+
+```
+
+```{r plot mitochondrial comparison, echo = FALSE, message=FALSE, warning=FALSE,error=FALSER, fig.height = 8, fig.width=s = 12}
+
+library(ggquadrilateral)
+library(ggrepel)
+
+##build universal mapping file for plotting
+mapping <- data.frame(
+  species = c("Btrispinosus","Pmyriaster","Obeta","Loculatus","Drerio"),
+  num = seq(5,1,-1),
+  species_long =c(
+    "Batrachomoeus_trispinosus",
+    "Porichthys_myriaster",
+    "Opsanus_beta",
+    "Lepisosteus_oculatus",
+    "Danio_rerio"
+  ),
+  full_name =c(
+    "Batrachomoeus trispinosus",
+    "Porichthys myriaster",
+    "Opsanus beta",
+    "Lepisosteus oculatus",
+    "Danio rerio"
+  )
+)
+
+
+
+### get all region features from files and rotate them to start with tRNA-Phe
+files <- list.files("Mitogenome/genome_rotation/",pattern = "_mitofeatures.txt",full.names = TRUE)
+features <- lapply(
+  files,
+  FUN = function(f) {
+    feat <- read.delim(f, header = TRUE, sep = "\t") %>% filter()
+    species = basename(f) %>% str_remove(., "_mitofeatures.txt")
+    shift = feat[feat$feature == "mitogenome", "stop"] - feat[feat$feature ==
+                                                                "Phe", "start"]
+    end = feat[feat$feature == "mitogenome", "stop"]
+    feat <- feat %>% filter(feature != "mitogenome")
+    feat <- feat %>% mutate(
+      start = (start + shift) %% end,
+      stop = (stop + shift) %% end,
+      species = species
+    ) %>% arrange(start)
+  }
+) %>% do.call("rbind", .) %>% inner_join(mapping)
+
+##Add info on tRNAs for plotting niceness and convert strand to number allow for placement
+features <- features %>%
+  full_join(
+    read.delim("Mitogenome/genome_rotation/amino_acid_code.txt", header = TRUE, sep = "\t") %>%
+      rename(feature = "Three_letter")
+  ) %>%
+  mutate(strad_num = ifelse(strand == "+", 1, -1))
+
+##fix broken annotation due to linearization and rotation 
+
+features <- features %>% filter(start != 4972 & stop != 5711)
+features[features$start ==5712 & features$stop == 6061,"start"] = 4972
+
+
+### get all blast hits from res files
+blast_header = str_split("qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore", " ") %>% unlist
+
+files <- list.files("Mitogenome/genome_rotation/", pattern = ".res$", full.names = TRUE)
+align <- lapply(
+  files,
+  FUN = function(f) {
+    dat <- read.delim(f, sep = "\t", header = FALSE, col.names = blast_header) %>%
+  filter(length > 50)
+    dat
+  }
+) %>% do.call("rbind", .) %>% inner_join(
+  mapping %>% select(species_long, num) %>% rename(qseqid = species_long, qnum = num)
+) %>% inner_join(
+  mapping %>% select(species_long, num) %>% rename(sseqid = species_long, snum = num)
+) %>% filter(evalue < 1e-6)
+
+ggplot(data = features) +
+  geom_rect(aes(
+    xmin = start, xmax = stop, ymin = num -0.25, ymax = num + 0.25, fill = type
+  ), color = "black", size = .2) +
+ geom_quadrilateral(data = align, aes(x1=qstart, y1 = qnum+0.25,
+                         x2 = qend, y2 = qnum+0.25,
+                         x3 = send, y3 = snum-0.25,
+                         x4 = sstart, y4 = snum-0.25),
+                     fill = "grey50", alpha =.5, inherit.aes = FALSE) +
+    geom_text(data =features %>% filter(type != "tRNA"),
+                                      aes(x = (stop+start)/2, y = num, label = feature),
+            size =2, angle = 90, face = "bold", color = "black") +
+  geom_text(data =features %>% filter(type == "tRNA"),
+                                      aes(x = (stop+start)/2, y = num + (strad_num * 0.32), 
+                                          label = One_letter),
+            size = 2, face = "bold", color = "black") +
+  theme_classic() +
+  scale_y_continuous(breaks=seq(5,1,-1),labels=mapping$full_name) +
+  scale_x_continuous(limits = c(0,20000),expand = c(0.025,0))+
+  scale_fill_manual(values =c(
+    "CDS" = "orange", "rRNA"="forestgreen", "tRNA"="cornflowerblue","Non-coding" = "red")
+  ) +
+  labs (x = "Position", y = "", fill = "") +
+  theme(legend.position = "top",
+        axis.text = element_text(face = "bold", color = "black"),
+        text = element_text(face = "bold", color = "black"),
+        axis.line = element_blank(),
+        axis.ticks.y = element_blank())
+
+ggsave(filename = "Mitogenome/genome_rotation/mito_synteny.pdf", device = "pdf",
+       width = 8, height = 4)
+
+
+
+##file manually tweaked in Adobe illustrator to prevent overlaps
+
+```
+
+
+unique

@@ -1,0 +1,12 @@
+#! /bin/bash
+
+#BSUB -P coral_omics
+#BSUB -J get_sras
+#BSUB -e get_sras.err
+#BSUB -o get_sras.out
+#BSUB -q general
+#BSUB -n 4
+
+
+/nethome/n.kron/local/sratoolkit/3.0.0/bin/fasterq-dump --threads 4 \
+--progress ERR1473903

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+#BSUB -n 16
+#BSUB -J RepModeler_Round_1
+#BSUB -o RepModeler_Round_1.out
+#BSUB -e RepModeler_Round_1.err
+#BSUB -W 72:00
+#BSUB -q bigmem
+#BSUB -P coral_omics
+
+RepeatMasker -pa 16 -a -e ncbi -dir 01_simple_out -noint -xsmall Obeta_v1.fasta 2>&1 | tee logs/01_simplemask.log

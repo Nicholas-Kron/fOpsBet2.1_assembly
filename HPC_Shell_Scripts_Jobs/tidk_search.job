@@ -1,0 +1,16 @@
+#! /usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J tidk_search
+#BSUB -e tidk_search.err
+#BSUB -o tidk_search.out
+#BSUB -q general
+#BSUB -n 5
+
+
+tidk search \
+--string AACCCT \
+--output fOpsBet2.1_telomeres \
+--dir . \
+--extension bedgraph \
+fOpsBet2.1_genomic.fa

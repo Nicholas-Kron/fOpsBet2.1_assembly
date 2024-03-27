@@ -1,0 +1,55 @@
+#!/bin/bash
+#BSUB -P coral_omics
+#BSUB -J hhblits_job
+#BSUB -o hhblits_job.out
+#BSUB -e hhblits_job.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -n 15
+
+
+SCRIPTS=/nethome/n.kron/local/Dinoflagellate_Annotation_Workflow/scripts
+HHSUITE=/nethome/n.kron/local/hhsuite2/bin
+TRANSPOSON_DB_HHBLITS=/scratch/projects/coral_omics/golden_genes/hhblits/transposons
+GENOME_NAME=Obeta_v1
+
+mkdir FASTA_SPLIT
+perl ${SCRIPTS}/fasta-splitter.pl --part-size 1 \
+--measure seq --out-dir FASTA_SPLIT \
+${GENOME_NAME}_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered.top_coverage_8080.faa
+
+## Run hhblits using a transposon database
+#
+# -p [0,100]     minimum probability in summary and alignment list (default=20)
+# -e     [0,1]   E-value cutoff for inclusion in result alignment (def=0.001)
+# -E [0,inf[     maximum E-value in summary and alignment list (default=1E+06)
+# -z <int>       minimum number of lines in summary hit list (default=10)
+# -b <int>       minimum number of alignments in alignment list (default=10)
+# -B <int>       maximum number of alignments in alignment list (default=500)
+# -Z <int>       maximum number of lines in summary hit list (default=500)
+#
+
+for var in FASTA_SPLIT/*.faa;
+do
+
+echo "processing ${var}"
+
+${HHSUITE}/hhblits -cpu 15 \
+-p 80 \
+-e 1E-5 \
+-E 1E-5 \
+-z 0 \
+-b 0 \
+-B 3 \
+-Z 3 \
+-i ${var}  \
+-d ${TRANSPOSON_DB_HHBLITS} \
+-o ${var}.hhr \
+-n 1 1> ${var}_hhblits.stdout 2> ${var}_hhblits.stderr
+
+echo "${var} processed"
+
+done
+
+echo "all done"
+

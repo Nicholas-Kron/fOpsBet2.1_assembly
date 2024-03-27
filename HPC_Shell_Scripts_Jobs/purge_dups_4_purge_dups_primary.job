@@ -1,0 +1,33 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J purge_4_primary
+#BSUB -e purge_4_primary.err
+#BSUB -o purge_4_primary.out
+#BSUB -W 120:00
+#BSUB -n 16
+#BSUB -R "rusage[mem=7500]"
+#BSUB -q bigmem
+
+echo $(date -u) "Purging haplotigs and overlaps..."
+
+mas="70 75 80 85 90"
+
+for score in ${mas}
+do
+purge_dups -2 \
+-a "${score}" \
+-T primary_asm_cutoffs \
+-c primary_asm_PB.base.cov \
+primary_asm.split.self.paf.gz > primary_asm_dups_a${score}.bed 2> primary_asm_purge_dups_a${score}.log
+
+##if BUSCO is negatively affected, try adjusting -a parameter from default of 70 up to 75 or 80
+
+echo $(date -u) "Haplotigs and overlaps purged!"
+
+echo $(date -u) "Retrieving purged primary and haplotig sequences from draft assembly!"
+
+get_seqs -e -p primary_asm_a${score} primary_asm_dups_a${score}.bed primary_asm.fa  
+
+echo $(date -u) "Sequences retreieved from draft assembly!"
+
+done

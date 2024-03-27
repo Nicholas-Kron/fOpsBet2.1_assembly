@@ -1,0 +1,14 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=15000]"
+#BSUB -J tf_raven
+#BSUB -n 10
+#BSUB -e /scratch/projects/coral_omics/raven/toadfish_raven.err
+#BSUB -o /scratch/projects/coral_omics/raven/toadfish_raven.out
+
+
+# run raven
+raven -t 10 /scratch/projects/coral_omics/raven/all_hifi_reads.fastq

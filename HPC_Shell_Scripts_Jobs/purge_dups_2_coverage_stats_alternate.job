@@ -1,0 +1,36 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J purge_alt
+#BSUB -e purge_2_alt.err
+#BSUB -o purge_2_alt.out
+#BSUB -W 6:00
+#BSUB -n 5
+#BSUB -q general
+
+
+echo $(date -u) "Getting base coverage and statistics files..."
+
+#bounds
+genomescope2_outdir=../raw_reads/hifi_genomescope2_out
+##transition
+lower_bound=`awk '{print $2}' ${genomescope2_outdir}/bound_stats.txt`
+##upper bound
+upper_bound=`awk '{print $3}' ${genomescope2_outdir}/bound_stats.txt`
+
+echo "transition is: ${lower_bound}, upper bound is: ${upper_bound}"
+
+## calculate cutoffs
+pbcstat alternate_asm_full.paf.gz #produces PB.base.cov and PB.stat files
+
+mv PB.base.cov alternate_asm_full_PB.base.cov
+mv PB.stat alternate_asm_full_PB.stat
+
+calcuts \
+-m $lower_bound \
+-u $upper_bound \
+-d 0 \
+alternate_asm_full_PB.stat > alternate_asm_full_cutoffs 2>alternate_asm_full_calcults.log
+
+
+echo $(date -u) "Base coverage and statistics files generated!"
+

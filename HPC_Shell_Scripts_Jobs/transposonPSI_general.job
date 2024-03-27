@@ -1,0 +1,15 @@
+#!/bin/bash
+#BSUB -P coral_omics
+#BSUB -J transposonPSI_job
+#BSUB -o transposonPSI_job.out
+#BSUB -e transposonPSI_job.err
+#BSUB -W 72:00
+#BSUB -q general
+#BSUB -n 15
+
+
+GENOME_NAME=Obeta_v1
+
+transposonPSI.pl \
+${GENOME_NAME}_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered.top_coverage_8080.faa \
+prot

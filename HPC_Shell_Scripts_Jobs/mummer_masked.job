@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=10000]"
+#BSUB -J OpsBet2ThaAma
+#BSUB -n 8
+#BSUB -e OpsBet2ThaAma.err
+#BSUB -o OpsBet2ThaAma.out
+
+export PERL5LIB=/nethome/n.kron/mambaforge/envs/mummer/bin/perl5.32.1
+
+# primary assembly self compare
+# make the delta input file using nucmer
+nucmer --version
+
+nucmer -l 500 -prefix OpsBet2ThaAma fOpsBet2.1_genomic.simple_mask.soft.complex_mask.hard.fa fThaAma1.1_genomic.fa.masked.hard
+
+DELTA=OpsBet2ThaAma.delta
+
+# prepare for dot using the .py script provided
+python ~/local/dot/DotPrep.py --delta $DELTA

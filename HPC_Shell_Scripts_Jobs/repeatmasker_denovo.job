@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_denovo
+#BSUB -o repmasker_denovo.out
+#BSUB -e repmasker_denovo.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=5000]"
+#BSUB -n 10
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+#Test models using only De Novo libraries skipping Dfam
+RepeatMasker -pa 9 \
+-a \
+-e ncbi \
+-dir . \
+-xsmall \
+-lib ../repclassifier/fOpsBet2.1_genomic-families.prefix.fa \
+${GENOME}_genomic.fa \
+2>&1 | tee repeatmasker_denovo.log

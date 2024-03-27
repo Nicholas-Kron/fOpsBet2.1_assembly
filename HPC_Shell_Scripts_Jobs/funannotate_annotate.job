@@ -1,0 +1,16 @@
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -J fun_annot
+#BSUB -n 10
+#BSUB -R "rusage[mem=2000]"
+#BSUB -e fun_annotate.err
+#BSUB -o fun_annotate.out
+
+funannotate annotate \
+-i funannotate/predict \
+-o funannotate/annotate \
+--sbt funannotate/fOpsBet2.1.sbt \
+--cpus 10 \
+--busco_db actinopterygii \
+--iprscan /nethome/n.kron/coral_omics/fOpsBet2.1/ips/Opsanus_beta_Bic.proteins.fa.xml

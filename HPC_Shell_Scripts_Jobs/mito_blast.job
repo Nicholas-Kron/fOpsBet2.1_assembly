@@ -1,0 +1,21 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -J mito_megablast
+#BUSB -e mito_megablast.err
+#BSUB -o mito_megablast.out
+#BSUB -q general
+#BSUB -n 8
+
+
+#megablast against mitogenome assembly
+
+blastn -query primary_asm_a80.purged.fa \
+-subject ../raw_reads/final_mitogenome.fasta \
+-task megablast \
+-outfmt 6 \
+-evalue 4 \
+-perc_identity 90 \
+-num_threads 8 \
+-out mito_hits.txt
+

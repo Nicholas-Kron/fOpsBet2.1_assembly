@@ -1,0 +1,80 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J purge_primary
+#BSUB -e purge_primary.err
+#BSUB -o purge_primary.out
+#BSUB -W 120:00
+#BSUB -n 16
+#BSUB -R "rusage[mem=7500]"
+#BSUB -q bigmem
+
+hifi_reads=../raw_reads/all.hifi_reads.fastq.gz
+
+echo $(date -u) "Purging haplotype duplicates from primary assembly with purge_dups..."
+
+
+echo $(date -u) "Aligning hifi reads to primary assembly with minimap2..."
+
+#for PacBio CCS reads, params from VGP
+minimap2 \
+-t 16 \
+-x map-hifi primary_asm.fa $hifi_reads | gzip -c - > primary_asm.paf.gz
+
+
+echo $(date -u) "Primary alignment complete!"
+
+echo $(date -u) "Getting base coverage and statistics files..."
+
+
+#bounds
+genomescope2_outdir=../raw_reads/hifi_genomescope2_out
+##transition
+lower_bound=`awk '{print $2}' ${genomescope2_outdir}/bound_stats.txt`
+##upper bound
+upper_bound=`awk '{print $3}' ${genomescope2_outdir}/bound_stats.txt`
+
+echo "transition is: ${lower_bound}, upper bound is: ${upper_bound}"
+
+## calculate cutoffs
+pbcstat primary_asm.paf.gz #produces PB.base.cov and PB.stat files
+
+mv PB.base.cov primary_asm_PB.base.cov
+mv PB.stat primary_asm_PB.stat
+
+calcuts \
+-f \
+-m $lower_bound \
+-u $upper_bound \
+-d 0 \
+primary_asm_PB.stat > primary_asm_cutoffs 2>primary_asm_calcults.log
+
+echo $(date -u) "Base coverage and statistics files generated!"
+
+echo $(date -u) "Generating self alignments..."
+
+split_fa primary_asm.fa > primary_asm.split
+
+minimap2 \
+-x asm5 \
+-DP \
+-k 19 \
+-w 19 \
+-m 200 \
+primary_asm.split primary_asm.split | gzip -c - > primary_asm.split.self.paf.gz
+
+echo $(date -u) "Self alignments generated!"
+
+echo $(date -u) "Purging haplotigs and overlaps..."
+
+purge_dups -2 \
+-T primary_asm_cutoffs \
+-c primary_asm_PB.base.cov \
+primary_asm.split.self.paf.gz > primary_asm_dups.bed 2> primary_asm_purge_dups.log
+
+echo $(date -u) "Haplotigs and overlaps purged!"
+
+echo $(date -u) "Retrieving purged primary and haplotig sequences from draft assembly!"
+
+get_seqs -e -p primary_asm primary_asm_dups.bed primary_asm.fa  
+
+echo $(date -u) "Sequences retreieved from draft assembly!"

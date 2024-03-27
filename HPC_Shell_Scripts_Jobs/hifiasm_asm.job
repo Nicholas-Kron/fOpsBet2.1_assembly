@@ -1,0 +1,14 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J hifiasm
+#BSUB -e hifiasm.err
+#BSUB -o hifiasm.out
+#BSUB -W 120:00
+#BSUB -n 16
+#BSUB -R "rusage[mem=5000]"
+#BSUB -q bigmem
+
+hifiasm -o Obeta_hifiasm.asm \
+-t 16 \
+../raw_reads/all.hifi_reads.fastq \
+2> Obeta_hifiasm.asm.log

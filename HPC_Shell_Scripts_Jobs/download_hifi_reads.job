@@ -1,0 +1,22 @@
+#!/bin/bash
+#BSUB -J download_files.job
+#BSUB -P coral_omics
+#BSUB -o download_files.out
+#BSUB -e download_files.err
+#BSUB -W 168:00
+#BSUB -q general
+#BSUB -n 3
+
+#get A1 outputs
+echo "downlaoding A1"
+wget -r --level=10 -nH -nc --cut-dirs=3 --no-parent --reject "wget_index.html" --no-check-certificate --header "Cookie: sessionid=k7and538n6a3gl1b3ypepsnlvkrtqpou;" https://bioshare.bioinformatics.ucdavis.edu/bioshare/wget/4f6101cq77luvwk/PB761_Bictoadie1_GulfToadfish_HiFiv3/r64069_20220603_212701/A1/outputs/wget_index.html
+
+#get B1 outputs
+echo "downloading B1"
+wget -r --level=10 -nH -nc --cut-dirs=3 --no-parent --reject "wget_index.html" --no-check-certificate --header "Cookie: sessionid=k7and538n6a3gl1b3ypepsnlvkrtqpou;" https://bioshare.bioinformatics.ucdavis.edu/bioshare/wget/4f6101cq77luvwk/PB761_Bictoadie1_GulfToadfish_HiFiv3/r64069_20220616_183720/B1/outputs/wget_index.html
+
+#get C1 output
+echo "downloading C1"
+wget -r --level=10 -nH -nc --cut-dirs=3 --no-parent --reject "wget_index.html" --no-check-certificate --header "Cookie: sessionid=e9zt649zz5hm93aowzlclibbu13oo40f;" https://bioshare.bioinformatics.ucdavis.edu/bioshare/wget/4f6101cq77luvwk/PB761_Bictoadie1_GulfToadfish_HiFiv3/r64069_20220616_183720/C1/outputs/wget_index.html
+
+echo "all done!"

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=20000]"
+#BSUB -J quickmerge
+#BSUB -n 8
+#BSUB -e /scratch/projects/coral_omics/quickmerge/quickmerge.err
+#BSUB -o /scratch/projects/coral_omics/quickmerge/quickmerge.out
+
+# this script will generate a consensus assembly from raw PacBio reads
+# set variables
+RAW_FASTQ=/scratch/projects/coral_omics/raw_reads/all.hifi_reads.fastq
+OUT_DIR=/scratch/projects/coral_omics/flye_assembly
+NUM_THREADS=6
+
+# Run nucmer
+/nethome/mxd1288/software/local/quickmerge/MUMmer3.23/nucmer -l 100 -prefix nucmer_out /scratch/projects/coral_omics/hifiasm_assembly/Obeta_hifiasm.asm.bp.p_ctg.fa /scratch/projects/coral_omics/flye_assembly/assembly.fasta
+
+# Delta filter
+delta-filter -r -q -l 10000 nucmer_out.delta > out.rq.delta
+
+# quickmerge
+quickmerge -d out.rq.delta -q /scratch/projects/coral_omics/flye_assembly/assembly.fasta -r /scratch/projects/coral_omics/hifiasm_assembly/Obeta_hifiasm.asm.bp.p_ctg.fa -hco 5.0 -c 1.5 -l n -ml m -p obeta_merged

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -J orthofinder
+#BSUB -e orthofinder.err
+#BSUB -o orthofinder.out
+#BSUB -W 120:00
+#BSUB -n 10
+#BSUB -q bigmem
+
+orthofinder -f refs/primary_transcripts

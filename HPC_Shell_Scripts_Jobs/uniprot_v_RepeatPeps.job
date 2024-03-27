@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+#BSUB -n 15
+#BSUB -J swissprot_v_RepeatPeps
+#BSUB -o swissprot_v_RepeatPeps.out
+#BSUB -e swissprot_v_RepeatPeps.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -P coral_omics
+
+
+blastp -query uniprot_sprot.fasta \
+       -db RepeatPeps/RepeatPeps.lib \
+       -outfmt '6 qseqid staxids bitscore std sscinames sskingdoms stitle' \
+       -max_target_seqs 25 \
+       -culling_limit 2 \
+       -num_threads 15 \
+       -evalue 1e-5 \
+       -out uniprot_sprot.fasta.vs.RepeatPeps.25cul2.1e5.blastp.out

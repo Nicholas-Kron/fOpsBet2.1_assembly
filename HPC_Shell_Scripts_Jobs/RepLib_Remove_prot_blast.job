@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#BSUB -n 15
+#BSUB -J repeatmodeller_lib.vs.swissport.no_tes
+#BSUB -o repeatmodeller_lib.vs.swissport.no_tes.out
+#BSUB -e repeatmodeller_lib.vs.swissport.no_tes.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -P coral_omics
+
+blastx -query RepeatModeler/fOpsBet2.1_genomic-families.fa \
+       -db /nethome/n.kron/coral_omics/databases/uniprot_sprot_no_TE.fasta \
+       -outfmt '6 qseqid staxids bitscore std sscinames sskingdoms stitle' \
+       -max_target_seqs 25 \
+       -culling_limit 2 \
+       -num_threads 15 \
+       -evalue 1e-10 \
+       -out repeatmodeller_lib.vs.transcripts.no_tes.25cul2.1e10.blastx.out

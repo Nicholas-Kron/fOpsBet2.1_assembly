@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#BSUB -n 16
+#BSUB -J maker.job
+#BSUB -o maker.out
+#BSUB -e maker.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -P coral_omics
+
+DIR=/scratch/projects/coral_omics/maker
+
+maker ${DIR}/MAKER_PROTEIN_maker_opts.ctl \
+ ${DIR}/MAKER_PROTEIN_maker_bopts.ctl \
+ ${DIR}/MAKER_PROTEIN_maker_exe.ctl 

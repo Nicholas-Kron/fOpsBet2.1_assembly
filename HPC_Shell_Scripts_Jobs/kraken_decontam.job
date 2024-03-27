@@ -1,0 +1,52 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J toadie_kraken
+#BSUB -e kraken.err
+#BSUB -o kraken.out
+##BSUB -W 72:00
+#BSUB -R "rusage[mem=10000]"
+#BSUB -n 8
+#BSUB -q bigmem
+
+
+#Dustmaker 
+
+
+if [[ ! -f fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa  ]]
+then
+
+echo "Soft masking assembly with dustmaker..."
+
+tr a-z A-Z < fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.fa | \
+    dustmasker -level 40 -out fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa -outfmt 'fasta'
+fi
+
+if [[ ! -f fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa  ]]
+then
+echo "Converting dusted genome to hard masked..."
+
+tr [:lower:] 'N' < fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.softmasked.fa > fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa
+
+echo "Hard masked genome generated. Continuing to contaminant screen..."
+
+fi
+
+echo "Begin contaminant screen with Kraken2..."
+
+DBNAME=/nethome/n.kron/coral_omics/databases/k2_pluspf_20230605
+
+asm="fOpsBet2.1"
+
+kraken2 \
+--db $DBNAME \
+--threads 8 \
+--conf 0.30 \
+--report ${asm}_sequences.report \
+--use-names \
+--output ${asm}_sequences.kraken \
+--classified-out ${asm}.classified.fasta \
+--unclassified-out ${asm}.unclassified.fasta \
+fOpsBet2.1_primary.purged.inspector3.ntlinks5.ragtag.hardmasked.fa
+
+
+echo "Contaminant screen complete. Bye!"

@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -J contaminant_blast
+#BUSB -e contam_blast.err
+#BSUB -o contam_blast.out
+#BSUB -q general
+#BSUB -n 15
+
+
+blastn  -query ../Obeta_hifiasm.asm.bp.p_ctg.fa \
+-db ref_prok_rep_genomes \
+-outfmt 6 \
+-evalue 1e-20 \
+-num_threads 15 \
+-out prok_contaminant_hits.txt
+
+blastn  -query ../Obeta_hifiasm.asm.bp.p_ctg.fa \
+-db ref_viruses_rep_genomes \
+-outfmt 6 \
+-evalue 1e-20 \
+-num_threads 15 \
+-out viral_contaminant_hits.txt
+
+cat viral_contaminant_hits.txt prok_contaminant_hits.txt > all_contaminant_hits.txt
+
+awk '$12 > 1000 {print $0}' all_contaminant_hits.txt > contaminant_hits.txt

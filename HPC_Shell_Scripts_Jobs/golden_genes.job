@@ -1,0 +1,22 @@
+#!/bin/bash
+#BSUB -P coral_omics
+#BSUB -J golden_genes_job
+#BSUB -o golden_genes_job.out
+#BSUB -e golden_genes_job.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=2500]"
+#BSUB -n 24
+
+SCRIPTS=/nethome/n.kron/local/Dinoflagellate_Annotation_Workflow/Prepare_Golden_Genes
+GENOME_NAME=Obeta_v1
+
+perl ${SCRIPTS}/prepare_golden_genes_for_predictors.pl \
+        -genome Obeta_v1.simple_mask.soft.complex_mask.hard.fasta \
+        -softmasked Obeta_v1.simple_mask.soft.fasta \
+        -no_gmap -same_species -intron 70000 -cpu 24 -norefine -complete -no_single -verbose \
+        -pasa_gff  PASA.assemblies.fasta.transdecoder.gff3 \
+        -pasa_peptides  PASA.assemblies.fasta.transdecoder.pep \
+        -pasa_cds  PASA.assemblies.fasta.transdecoder.cds \
+        -pasa_genome  PASA.assemblies.fasta.transdecoder.genome.gff3 \
+        -pasa_assembly  ${GENOME_NAME}_pasa.assemblies.fasta

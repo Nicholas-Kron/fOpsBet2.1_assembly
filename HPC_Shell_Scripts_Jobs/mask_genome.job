@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J mask_genome
+#BSUB -o mask_genome.out
+#BSUB -e mask_genome.err
+#BSUB -W 120:00
+#BSUB -q general
+#BSUB -n 8
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+
+GENOME=fOpsBet2.1
+
+# create masked genome FASTA files
+# create simple repeat soft-masked genome
+bedtools maskfasta -soft -fi ${GENOME}_genomic.fa \
+-bed 05_full_out/${GENOME}_genomic.simple_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.simple_mask.soft.fa
+
+# create complex repeat hard-masked genome
+bedtools maskfasta -fi 05_full_out/${GENOME}_genomic.simple_mask.soft.fa \
+-bed 05_full_out/${GENOME}_genomic.complex_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.simple_mask.soft.complex_mask.hard.fa
+
+# create full soft-masked genome
+bedtools maskfasta -soft -fi ${GENOME}_genomic.fa \
+-bed 05_full_out/${GENOME}_genomic.full_mask.gff3 \
+-fo 05_full_out/${GENOME}_genomic.full_mask.soft.fa
+

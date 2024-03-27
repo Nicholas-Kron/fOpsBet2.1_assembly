@@ -1,0 +1,27 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J purge_1_alt
+#BSUB -e purge_1_alt.err
+#BSUB -o purge_1_alt.out
+#BSUB -W 120:00
+#BSUB -n 15
+#BSUB -R "rusage[mem=1500]"
+#BSUB -q general
+
+cat primary_asm_a80.hap.fa  alternate_asm.fa > alternate_asm_full.fa
+
+hifi_reads=../raw_reads/all.hifi_reads.fastq.gz
+
+echo $(date -u) "Purging haplotype duplicates from primary assembly with purge_dups..."
+
+
+echo $(date -u) "Aligning hifi reads to primary assembly with minimap2..."
+
+#for PacBio CCS reads, params from VGP
+minimap2 \
+-t 15 \
+-x map-hifi alternate_asm_full.fa $hifi_reads | gzip -c - > alternate_asm_full.paf.gz
+
+
+echo $(date -u) "Primary alignment complete!"
+

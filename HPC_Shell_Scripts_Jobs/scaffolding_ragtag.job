@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=3000]"
+#BSUB -J ragtag_scaffold
+#BSUB -n 15
+#BSUB -e ntlinks_ragtag.err
+#BSUB -o ntlinks_ragtag.out
+
+# scaffold a query assembly
+ragtag.py scaffold -t 15 ThaAma1.1_genomic.fa current_asm.fa
+
+

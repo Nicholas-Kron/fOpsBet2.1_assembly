@@ -1,0 +1,17 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=7500]"
+#BSUB -J ntlinks-ark_scaffold
+#BSUB -n 16
+#BSUB -e ntlinks-ark_scaffold.err
+#BSUB -o ntlinks-ark_scaffold.out
+
+export PERL5LIB=/nethome/n.kron/mambaforge/envs/longstitch/bin/perl5.32.1
+
+longstitch ntLink-arks \
+reads=hifi_reads \
+draft=obeta_primary_assembly \
+rounds=5

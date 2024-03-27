@@ -1,0 +1,18 @@
+#!/bin/bash
+#BSUB -n 30
+#BSUB -J blast_peps  
+#BSUB -o blast_peps.out
+#BSUB -e blast_peps.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -P coral_omics
+
+
+blastp -query Obeta_v1_pasa.assemblies.fasta.transdecoder.pep.complete_only.filtered \
+-db refseq_protein_Jan2023/refseq_protein \
+-max_target_seqs 25 \
+-culling_limit 2 \
+-num_threads 24 \
+-evalue 1e-6 \
+-outfmt 6 \
+-out blastp.outfmt6

@@ -1,0 +1,18 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BUSB -J quast
+#BSUB -e quast.err
+#BUSB -o quast.out
+#BUSB -q general
+#BSUB -n 10
+
+
+
+quast.py \
+-t 10 \
+--eukaryote \
+--large \
+--k-mer-stats \
+--k-mer-size 31 \
+*.fa

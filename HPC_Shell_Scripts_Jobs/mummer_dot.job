@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=10000]"
+#BSUB -J dot_compare
+#BSUB -n 8
+#BSUB -e self_dot_compare.err
+#BSUB -o self_dot_compare.out
+
+export PERL5LIB=/nethome/n.kron/mambaforge/envs/mummer/bin/perl5.32.1
+
+# primary assembly self compare
+# make the delta input file using nucmer
+nucmer --version
+
+nucmer -l 100 -prefix OpsBet2ThaAma ../fOpsBet2.1_genomic.fa ../GCF_902500255.1_fThaAma1.1_genomic.fa
+
+DELTA=OpsBet2ThaAma.delta
+
+# prepare for dot using the .py script provided
+python ~/local/dot/DotPrep.py --delta $DELTA

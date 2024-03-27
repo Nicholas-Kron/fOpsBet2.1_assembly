@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_round2
+#BSUB -o repmasker_round2_FishTEDB.out
+#BSUB -e repmasker_round2_Fish_TEDB.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=1500]"
+#BSUB -n 25
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+# round 2: annotate/mask Fish elements sourced from FishTEDB using output from 1st round of RepeatMasker
+RepeatMasker -pa 24 \
+-a \
+-e ncbi \
+-dir 02_FishTEDB_out \
+-nolow \
+-lib ../FishTEDB/FishTEDB.fa \
+01_simple_out/${GENOME}.simple_mask.masked.fa \
+2>&1 | tee logs/02_FishTEDB_mask.log
+
+# round 2: rename outputs
+rename simple_mask.masked.fa FishTEDB_mask FishTEDB_out/${GENOME}* 
+rename .masked .masked.fa 02_FISHTEDB_out/${GENOME}*

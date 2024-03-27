@@ -1,0 +1,16 @@
+#! /usr/bin/env bash
+
+#BSUB -P coral_omics
+#BUSB -J MitoHifi
+#BSUB -e MitoHifi.err
+#BSUB -o MitoHifi.out
+#BSUB -W 48:00
+#BSUB -n 8
+#BSUB -q general
+
+python /nethome/n.kron/local/MitoHiFi/3.0.0/mitohifi.py \
+-c ../alternate_asm_full.fa \
+-f AP006739.1.fasta \
+-g AP006739.1.gb \
+-t 8 \
+-o 2

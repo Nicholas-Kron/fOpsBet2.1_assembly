@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J parse_RM
+#BSUB -o parse_RM.out
+#BSUB -e parse_RM.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -n 10
+#BSUB -R "rusage[mem=7500]"
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+
+allLen=`seqtk comp ${GENOME}.fa | datamash sum 2`;
+echo $allLen
+parseRM.pl -v -i 05_full_out/${GENOME}.full_mask.align -p -g 2151823914 -l 50,1 2>&1 | tee logs/06_parserm.log

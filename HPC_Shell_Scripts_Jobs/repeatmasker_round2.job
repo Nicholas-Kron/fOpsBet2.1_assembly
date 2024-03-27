@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J repmasker_round2
+#BSUB -o repmasker_round2.out
+#BSUB -e repmasker_round2.err
+#BSUB -W 120:00
+#BSUB -q bigmem
+#BSUB -R "rusage[mem=5000]"
+#BSUB -n 10
+
+
+PERL5LIB=~/mambaforge/envs/repeatmodeling/bin/perl
+GENOME=fOpsBet2.1_genomic
+
+# round 2: annotate/mask Actinopterygii elements sourced from Dfam using output from 1st round of RepeatMasker
+RepeatMasker -pa 9 \
+-a \
+-e ncbi \
+-dir 02_actinopterygii_out \
+-nolow \
+-species Actinopterygi \
+01_simple_out/${GENOME}.simple_mask.masked.fa \
+2>&1 | tee logs/02_tetrapodamask.log
+
+# round 2: rename outputs
+rename simple_mask.masked.fa actinopterygii_mask 02_actinopterygii_out/${GENOME}* 
+rename .masked .masked.fa 02_actinopterygii_out/${GENOME}*

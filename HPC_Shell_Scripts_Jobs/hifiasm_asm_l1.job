@@ -1,0 +1,23 @@
+#! /usr/bin/env bash
+#BSUB -P coral_omics
+#BSUB -J hifiasm
+#BSUB -e hifiasm.err
+#BSUB -o hifiasm.out
+#BSUB -W 120:00
+#BSUB -n 16
+#BSUB -R "rusage[mem=10000]"
+#BSUB -q bigmem
+
+hifi_reads=../raw_reads/all.hifi_reads.fastq.gz
+
+upper_bound=`awk '{print $3}' ../raw_reads/hifi_genomescope2_out/bound_stats.txt`
+
+
+hifiasm -o Obeta_hifiasm.asm_l1 \
+-t 16 \
+-f0 \
+-l 1 \
+--primary \
+--purge-max $upper_bound \
+$hifi_reads \
+2> Obeta_hifiasm.asm.log

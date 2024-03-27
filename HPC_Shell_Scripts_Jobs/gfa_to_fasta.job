@@ -1,0 +1,14 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BUSB -J convert_gfa
+#BSUB -e convert_gfa.err
+#BUSB -o convert_gfa.out
+#BUSB -q general
+#BSUB -n 10
+
+
+
+awk '/^S/{print ">"$2;print $3}' Obeta_hifiasm.asm.bp.p_ctg.gfa > Obeta_hifiasm.asm.bp.p_ctg.fa
+awk '/^S/{print ">"$2;print $3}' Obeta_hifiasm.asm.bp.hap1.p_ctg.gfa > Obeta_hifiasm.asm.bp.hap1.p_ctg.fa
+awk '/^S/{print ">"$2;print $3}' Obeta_hifiasm.asm.bp.hap2.p_ctg.gfa > Obeta_hifiasm.asm.bp.hap2.p_ctg.fa

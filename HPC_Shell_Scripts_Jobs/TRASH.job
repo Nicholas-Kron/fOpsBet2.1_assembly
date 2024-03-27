@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+#BSUB -P coral_omics
+#BSUB -J TRASH
+#BSUB -o TRASH.out
+#BSUB -e TRASH.err
+#BSUB -q bigmem
+#BSUB -n 10
+#BSUB -R "rusage[mem=4000]"
+#BSUB -W 120:00
+
+
+export LD_LIBRARY_PATH=${HOME}/mambaforge/envs/TRASH/lib:$LD_LIBRARY_PATH
+GENOME=fOpsBet2.1_genomic
+
+TRASH_run.sh \
+--simpleplot \
+--par 0 \
+--randomseed 777 \
+${GENOME}.fa 

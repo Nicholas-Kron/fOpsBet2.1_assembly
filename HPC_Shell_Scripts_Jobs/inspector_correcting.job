@@ -1,0 +1,16 @@
+#!/bin/bash
+
+#BSUB -P coral_omics
+#BSUB -q bigmem
+#BSUB -W 120:00
+#BSUB -R "rusage[mem=10000]"
+#BSUB -J inspector_fix
+#BSUB -n 16
+#BSUB -e inspector_fix.err
+#BSUB -o inspector_fix.out
+
+inspector-correct.py \
+-i inspector_out/ \
+--datatype pacbio-hifi \
+-o inspector_out/ \
+-t 16
